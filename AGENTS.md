@@ -26,7 +26,7 @@
 - 工程创建（P0 第一项）：Xcode 工程尚未创建。优先由用户在 Xcode 新建 App 模板工程（产品名 `Chrysalis`）；请勿手工拼 `.pbxproj`。
 - Swift 6 并发 + AVFoundation 非 Sendable：引擎隔离在专用串行队列；必要时 `@preconcurrency import AVFoundation`；事件用简单值类型（见设计文档第 12 节风险表）。
 - 测试：用 `AVAssetWriter` 在测试里生成 2 秒测试片，仓库不放大文件；无硬件编码器的环境用 `XCTSkip` 或期望错误。
-- 构建 / 测试命令（工程创建后）：
-  - `xcodebuild -project Chrysalis.xcodeproj -scheme Chrysalis -configuration Debug build`
-  - `xcodebuild test -project Chrysalis.xcodeproj -scheme Chrysalis`
+- 构建 / 测试命令：
+  - `xcodebuild -project Chrysalis/Chrysalis.xcodeproj -scheme Chrysalis -configuration Debug build`（在仓库根执行；工程目录为 `Chrysalis/`，源码在 `Chrysalis/Chrysalis/`，使用文件系统同步组，新增 .swift 文件无需改工程）
+  - `xcodebuild test -project Chrysalis/Chrysalis.xcodeproj -scheme Chrysalis`（暂无测试 Target，P6 添加）
 - 面向用户的文案、注释与提交信息使用中文。
