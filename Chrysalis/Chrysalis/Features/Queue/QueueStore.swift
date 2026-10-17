@@ -46,6 +46,8 @@ final class QueueStore {
     private var runnerTask: Task<Void, Never>?
     private var isStopRequested = false
     private var bannerDismissTask: Task<Void, Never>?
+    /// 已选择输出目录的沙盒作用域持有（选择器返回的 URL 需要显式开始访问）。
+    private var heldOutputScopeURL: URL?
 
     // MARK: - 生命周期
 
@@ -148,11 +150,41 @@ final class QueueStore {
     // MARK: - 输出目录
 
     func setOutputDirectory(_ url: URL) {
+        // 文件夹选择器返回的 URL 是安全作用域：必须持有访问权才能写入（用户选择即授权）。
+        let previousHeld = heldOutputScopeURL
+        let scoped = url.startAccessingSecurityScopedResource()
+
+        // 可写性预检：尽早暴露沙盒/权限问题，而不是等任务跑到一半才失败。
+        guard isWritableDirectory(url) else {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            showBanner(
+                kind: .error,
+                message: "无法写入「\(url.lastPathComponent)」：请换一个位置（沙盒只允许写入用户显式选择的目录）。"
+            )
+            return
+        }
+
+        // 预检通过才真正切换；旧目录作用域此时释放
+        previousHeld?.stopAccessingSecurityScopedResource()
+        heldOutputScopeURL = scoped ? url : nil // P2 起改为持久化安全书签
         outputDirectory = url
-        // 启动/切换目录时清理残留临时文件（设计文档 §6.4）
+
+        // 切换目录时清理残留临时文件（设计文档 §6.4）
         let removed = OutputPlanner.cleanupOrphanTemps(in: url)
         if !removed.isEmpty {
             Log.engine.info("清理残留临时文件 \(removed.count) 个")
+        }
+    }
+
+    /// 真实写入探针：创建并删除一个临时文件，验证目录可写。
+    private func isWritableDirectory(_ directory: URL) -> Bool {
+        let probe = directory.appendingPathComponent(".chrysalis-write-test.tmp")
+        do {
+            try Data().write(to: probe)
+            try? FileManager.default.removeItem(at: probe)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -348,6 +380,7 @@ final class QueueStore {
         jobs[index].state = .failed(message)
         jobs[index].errorText = message
         Log.engine.error("任务失败：\(message, privacy: .public)")
+        showBanner(kind: .error, message: "\(jobs[index].displayName)：\(message)")
     }
 
     private func applyProgress(_ progress: TranscodeProgress, to id: UUID) {

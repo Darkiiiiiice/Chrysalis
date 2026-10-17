@@ -6,9 +6,10 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 
 ## 状态
 
-**P0 技术验证已完成**（2026-10-17，全部通过标准达成）。**P1 单文件 MVP 代码已就绪，待手工验收**。
+**P0 技术验证已完成**（2026-10-17，全部通过标准达成）。**P1 单文件 MVP 代码已就绪，待手工验收**（2026-10-17 修复输出目录沙盒写入权限，并迁移到 macOS 27 新 AVFoundation 读写 API，零警告）。
 
-- Xcode 工程：[`Chrysalis/Chrysalis.xcodeproj`](Chrysalis/Chrysalis.xcodeproj) —— 仅 macOS 14.0+、Swift 6（严格并发）、App Sandbox、Hardened Runtime
+- Xcode 工程：[`Chrysalis/Chrysalis.xcodeproj`](Chrysalis/Chrysalis.xcodeproj) —— 仅 macOS 27.0+、Swift 6（严格并发）、App Sandbox、Hardened Runtime
+- 转码读写：macOS 27 新 AVFoundation 异步模型（`AVAssetReader.outputProvider` / `AVAssetWriter.inputReceiver`，视频/音频各一个并发泵；`AVVideoComposition.Configuration` 旋转合成）
 - 构建：`xcodebuild -project Chrysalis/Chrysalis.xcodeproj -scheme Chrysalis -configuration Debug build`（当前零警告、可直接运行）
 - 实测报告：[`docs/P0-实测报告.md`](docs/P0-实测报告.md) —— 能力矩阵、吞吐（1080p H.264→H.264 6.2x；4K HEVC→1080p H.264 5.7x）、取消与临时文件、元数据 identifier 写回矩阵
 - 验证工具：[`Validation/P0/`](Validation/P0/) —— 命令行 `p0`（`swift run p0 all` 可复跑全部实测）
@@ -27,14 +28,14 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 ## 环境
 
 - 开发环境：Xcode 27.1 / Swift 6.4 / macOS 27.0.1 / Apple M1 Pro
-- 最低系统 macOS 14.0（见设计文档第 2 节；第 13 节列为待确认项）
+- 最低系统 macOS 27.0（设计文档第 2 节；2026-10-17 由用户拍板，与开发机和最新 SDK 对齐）
 - 硬件能力已在 M1 Pro 实测：Apple H.264 (HW) / Apple HEVC (HW) / AppleProResHW 422 系列可用；无 AV1/VP9 编码器
 
 ## P1 单文件 MVP（代码已就绪，待验收）
 
 已实现（源码在 `Chrysalis/Chrysalis/`）：
 
-1. 工程：仅 macOS 14.0+、Swift 6 语言模式、App Sandbox（用户选择文件读写）、Hardened Runtime；无 iOS 残留配置。
+1. 工程：仅 macOS 27.0+、Swift 6 语言模式、App Sandbox（用户选择文件读写）、Hardened Runtime；无 iOS 残留配置。
 2. 设计 Token：Asset Catalog 12 个颜色（Any/Dark 两套，视图零硬编码 hex）；字体、间距、圆角、动效在 `UI/Theme.swift`；24px 拖放网格。
 3. 两栏 `NavigationSplitView`（侧边栏 208 + 详情）+ 原生 toolbar（添加 / 开始 / 取消 / 输出文件夹 / 检查器）+ `⌘I` 可隐藏检查器（304px）。
 4. 拖放与文件选择（MP4/MOV/M4V；其他类型忽略并轻提示）、媒体信息预检（容器/轨道/尺寸/帧率/码率/音频/HDR/硬件解码）。
@@ -44,7 +45,7 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 验收步骤（手工）：
 
 1. Xcode 打开 `Chrysalis/Chrysalis.xcodeproj` 运行，或直接 `open` 构建产物。
-2. 工具栏「输出文件夹」选一个目录 → 拖入一个 MP4 → 点「开始」。
+2. 工具栏「输出文件夹」选一个目录（**修复后请重新选择一次**：选择时会做写入探针，沙盒持有该目录访问权；不可写会直接提示换目录）→ 拖入一个 MP4 → 点「开始」。
 3. 预期：出现 HW 徽章与速度/剩余时间；完成后输出可播放；行尾显示输出大小。
 4. 取消验证：转码中途点行尾 ✕（hover 出现）或 `⌘.`；输出来源目录里不应留下 `.chrysalis-*.tmp`。
 5. 暗色/浅色切换检查界面是否符合 Token（无硬编码颜色）。

@@ -319,7 +319,7 @@ final class SineAudioSource {
             customBlockSource: nil,
             offsetToData: 0,
             dataLength: byteCount,
-            flags: 0,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
             blockBufferOut: &blockBuffer
         ) == kCMBlockBufferNoErr, let blockBuffer else { return nil }
 

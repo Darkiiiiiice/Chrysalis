@@ -85,6 +85,13 @@ actor TranscodeEngine {
         cancelFlag.cancel()
     }
 
+    /// 单个轨泵的收尾统计（跨并发任务传递的值类型）。
+    private struct PumpStats: Sendable {
+        var frames = 0
+        var processedSeconds = 0.0
+        var emaSpeed = 0.0
+    }
+
     /// 执行一次转码：写同目录临时文件 → 成功后原子移动到最终路径。
     func run(
         _ request: TranscodeRequest,
@@ -150,13 +157,9 @@ actor TranscodeEngine {
 
         let videoOutput: AVAssetReaderOutput
         if needsComposition {
-            let composition = AVMutableVideoComposition()
-            composition.renderSize = renderSize
-            composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(mediaFPS.rounded(), 1)))
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
-            let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
-            layer.setTransform(
+            // macOS 26 起 AVMutable* 系列弃用，改用 Configuration 值类型（部署目标 27.0）
+            var layerConfiguration = AVVideoCompositionLayerInstruction.Configuration(trackID: videoTrack.trackID)
+            layerConfiguration.setTransform(
                 VideoGeometry.fitTransform(
                     naturalSize: naturalSize,
                     preferredTransform: preferredTransform,
@@ -165,8 +168,20 @@ actor TranscodeEngine {
                 ),
                 at: .zero
             )
-            instruction.layerInstructions = [layer]
-            composition.instructions = [instruction]
+            let layerInstruction = AVVideoCompositionLayerInstruction(configuration: layerConfiguration)
+            let instructionConfiguration = AVVideoCompositionInstruction.Configuration(
+                backgroundColor: nil,
+                enablePostProcessing: false,
+                layerInstructions: [layerInstruction],
+                requiredSourceSampleDataTrackIDs: [videoTrack.trackID],
+                timeRange: CMTimeRange(start: .zero, duration: duration)
+            )
+            let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)
+            var compositionConfiguration = AVVideoComposition.Configuration()
+            compositionConfiguration.renderSize = renderSize
+            compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(mediaFPS.rounded(), 1)))
+            compositionConfiguration.instructions = [instruction]
+            let composition = AVVideoComposition(configuration: compositionConfiguration)
 
             let output = AVAssetReaderVideoCompositionOutput(
                 videoTracks: [videoTrack],
@@ -185,11 +200,9 @@ actor TranscodeEngine {
                 ]
             )
         }
-        videoOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOutput) else {
             throw TranscodeEngineError.readerSetupFailed("无法添加视频输出")
         }
-        reader.add(videoOutput)
 
         // 音频：解码为 LPCM，稍后统一编码 AAC（设计文档 §6.3）
         var audioOutput: AVAssetReaderTrackOutput?
@@ -209,9 +222,7 @@ actor TranscodeEngine {
                 AVLinearPCMIsNonInterleaved: false,
             ]
             let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: decodeSettings)
-            output.alwaysCopiesSampleData = false
             if reader.canAdd(output) {
-                reader.add(output)
                 audioOutput = output
             } else {
                 notes.append("音频轨无法解码，本次跳过音频")
@@ -231,11 +242,9 @@ actor TranscodeEngine {
             mediaType: .video,
             outputSettings: videoOutputSettings(request: request, size: renderSize, fps: mediaFPS)
         )
-        videoInput.expectsMediaDataInRealTime = false
         guard writer.canAdd(videoInput) else {
             throw TranscodeEngineError.writerSetupFailed("无法添加视频写入器（可能是硬件编码器不可用）")
         }
-        writer.add(videoInput)
 
         var audioInput: AVAssetWriterInput?
         if audioOutput != nil {
@@ -252,9 +261,7 @@ actor TranscodeEngine {
                 AVNumberOfChannelsKey: channels,
             ]
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            input.expectsMediaDataInRealTime = false
             if writer.canAdd(input) {
-                writer.add(input)
                 audioInput = input
             } else {
                 notes.append("音频编码器不可用，本次跳过音频")
@@ -262,17 +269,35 @@ actor TranscodeEngine {
             }
         }
 
+        // 输入接收端（macOS 27 新 API：inputReceiver 取代 writer.add，必须在 start() 之前注册）
+        let videoReceiver = writer.inputReceiver(for: videoInput)
+        let audioReceiver = audioInput.map { writer.inputReceiver(for: $0) }
+
         // 启动（RequireHardware 标志在此被接受或拒绝，设计文档 §7）
-        guard writer.startWriting() else {
+        do {
+            try writer.start()
+        } catch {
+            if isPermissionError(error) || isPermissionError(writer.error) {
+                throw TranscodeEngineError.writerSetupFailed(
+                    "无法写入输出文件夹（沙盒权限不足）：请在工具栏重新选择输出文件夹后再试"
+                )
+            }
             let hint = request.requireHardware ? "（通常是没有可用的硬件编码器）" : ""
-            throw TranscodeEngineError.writerSetupFailed("startWriting 失败\(hint)：\(errorText(writer.error))")
-        }
-        guard reader.startReading() else {
-            writer.cancelWriting()
-            try? fm.removeItem(at: tempURL)
-            throw TranscodeEngineError.readerSetupFailed(errorText(reader.error))
+            throw TranscodeEngineError.writerSetupFailed("启动写入失败\(hint)：\(errorText(error))")
         }
         writer.startSession(atSourceTime: .zero)
+
+        // 输出读取端（outputProvider 取代 reader.add，必须在 start() 之前注册）
+        let videoProvider = reader.outputProvider(for: videoOutput)
+        let audioProvider = audioOutput.map { reader.outputProvider(for: $0) }
+
+        do {
+            try reader.start()
+        } catch {
+            writer.cancelWriting()
+            try? fm.removeItem(at: tempURL)
+            throw TranscodeEngineError.readerSetupFailed(errorText(error))
+        }
 
         // 转码期间防止系统休眠（设计文档 §7 并发与功耗）
         let activity = ProcessInfo.processInfo.beginActivity(
@@ -281,75 +306,71 @@ actor TranscodeEngine {
         )
         defer { ProcessInfo.processInfo.endActivity(activity) }
 
-        // MARK: 读写循环
+        // MARK: 读写循环（每轨一个异步泵；背压由 receiver.append 挂起处理）
         let started = Date.now
         let durationSeconds = duration.seconds.isFinite ? duration.seconds : 0
-        var processed = 0.0
-        var emaSpeed = 0.0
-        var videoDone = false
-        var audioDone = (audioOutput == nil)
-        var lastReport = started
-
-        func report(force: Bool) {
-            let now = Date.now
-            if !force, now.timeIntervalSince(lastReport) < 0.1 { return }
-            lastReport = now
-            let wall = max(now.timeIntervalSince(started), 0.0001)
-            let instantaneous = processed / wall
-            emaSpeed = emaSpeed == 0 ? instantaneous : emaSpeed * 0.85 + instantaneous * 0.15
-            let fraction = durationSeconds > 0 ? min(processed / durationSeconds, 1.0) : 0
-            let eta = emaSpeed > 0 && durationSeconds > 0 ? max(durationSeconds - processed, 0) / emaSpeed : nil
-            progress(TranscodeProgress(
-                fraction: fraction,
-                processedSeconds: processed,
-                speed: emaSpeed,
-                etaSeconds: eta
-            ))
-        }
 
         do {
-            while true {
-                if cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
-                var appended = false
+            let finalStats = try await withThrowingTaskGroup(of: PumpStats.self) { group in
+                group.addTask {
+                    var stats = PumpStats()
+                    var lastReport = started
+                    while let ready = try await videoProvider.next() {
+                        if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
+                        try await videoReceiver.append(ready)
+                        stats.frames += 1
+                        let pts = ready.presentationTimeStamp.seconds
+                        if pts.isFinite { stats.processedSeconds = max(stats.processedSeconds, pts) }
 
-                if !videoDone {
-                    if videoInput.isReadyForMoreMediaData {
-                        if let buffer = videoOutput.copyNextSampleBuffer() {
-                            guard videoInput.append(buffer) else {
-                                throw TranscodeEngineError.readWriteFailed("视频帧写入失败：\(errorText(writer.error))")
-                            }
-                            let pts = CMSampleBufferGetPresentationTimeStamp(buffer).seconds
-                            if pts.isFinite { processed = max(processed, pts) }
-                            report(force: false)
-                            appended = true
-                        } else {
-                            videoInput.markAsFinished()
-                            videoDone = true
+                        let now = Date.now
+                        if now.timeIntervalSince(lastReport) >= 0.1 {
+                            lastReport = now
+                            let wall = max(now.timeIntervalSince(started), 0.0001)
+                            let instantaneous = stats.processedSeconds / wall
+                            stats.emaSpeed = stats.emaSpeed == 0
+                                ? instantaneous
+                                : stats.emaSpeed * 0.85 + instantaneous * 0.15
+                            let fraction = durationSeconds > 0 ? min(stats.processedSeconds / durationSeconds, 1.0) : 0
+                            let eta = stats.emaSpeed > 0 && durationSeconds > 0
+                                ? max(durationSeconds - stats.processedSeconds, 0) / stats.emaSpeed
+                                : nil
+                            progress(TranscodeProgress(
+                                fraction: fraction,
+                                processedSeconds: stats.processedSeconds,
+                                speed: stats.emaSpeed,
+                                etaSeconds: eta
+                            ))
                         }
+                    }
+                    videoReceiver.finish()
+                    return stats
+                }
+
+                if let audioProvider, let audioReceiver {
+                    group.addTask {
+                        while let ready = try await audioProvider.next() {
+                            if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
+                            try await audioReceiver.append(ready)
+                        }
+                        audioReceiver.finish()
+                        return PumpStats()
                     }
                 }
 
-                if !audioDone {
-                    if audioInput?.isReadyForMoreMediaData == true, let output = audioOutput {
-                        if let buffer = output.copyNextSampleBuffer() {
-                            guard audioInput?.append(buffer) == true else {
-                                throw TranscodeEngineError.readWriteFailed("音频写入失败：\(errorText(writer.error))")
-                            }
-                            appended = true
-                        } else {
-                            audioInput?.markAsFinished()
-                            audioDone = true
-                        }
-                    }
+                var videoStats = PumpStats()
+                for try await stats in group {
+                    if stats.frames > videoStats.frames { videoStats = stats }
                 }
-
-                if videoDone && audioDone { break }
-                if !appended { usleep(1500) } // 视频与音频必须交替喂数据，避免死锁
+                return videoStats
             }
 
             if cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
-            processed = durationSeconds
-            report(force: true)
+            progress(TranscodeProgress(
+                fraction: durationSeconds > 0 ? 1 : 0,
+                processedSeconds: durationSeconds,
+                speed: finalStats.emaSpeed,
+                etaSeconds: durationSeconds > 0 ? 0 : nil
+            ))
             await writer.finishWriting()
             guard writer.status == .completed else {
                 throw TranscodeEngineError.readWriteFailed("收尾写入失败：\(errorText(writer.error))")
@@ -505,6 +526,24 @@ actor TranscodeEngine {
         if available < requiredBytes {
             throw TranscodeEngineError.lowDiskSpace(requiredBytes: requiredBytes, availableBytes: available)
         }
+    }
+
+    /// 判断是否为权限类错误（沙盒无写入权限等），用于给出可操作的中文提示。
+    private static func isPermissionError(_ error: Error?) -> Bool {
+        guard let error else { return false }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileWriteNoPermissionError {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            if underlying.domain == NSCocoaErrorDomain, underlying.code == NSFileWriteNoPermissionError {
+                return true
+            }
+            if underlying.domain == NSPOSIXErrorDomain, underlying.code == Int(EACCES) {
+                return true
+            }
+        }
+        return false
     }
 
     private static func errorText(_ error: Error?) -> String {
