@@ -11,12 +11,26 @@ struct TranscodeRequest: Sendable {
     var resolution: ResolutionSetting
     /// 输出帧率档位（设计文档 P3.5：只降不升）。
     var frameRate: FrameRateSetting
-    /// 平均码率（bps）；ProRes 传 nil。
+    /// 平均码率（bps）；质量/目标大小模式或 ProRes 传 nil。
     var averageBitrate: Int?
+    /// 码率控制方式（设计文档 P4）。
+    var bitrateMode: BitrateMode = .targetBitrate
+    /// 质量优先的质量值（0.05–1.0）。
+    var quality: Double = 0.65
+    /// 目标大小（字节 / 每个输出文件）；仅 `bitrateMode == .targetSize` 生效。
+    var targetSizeBytes: Int64?
+    /// 平均码率夹取范围（目标大小换算用）。
+    var bitrateRange: ClosedRange<Int> = 0...Int.max
+    /// 关键帧间隔（H.264 / HEVC）。
+    var keyframeInterval: KeyframeIntervalSetting = .auto
+    /// H.264 Profile（HEVC / ProRes 仅自动）。
+    var profile: VideoProfileSetting = .auto
     var audioBitrate: Int
     var audioMaxChannels: Int
     /// 目标采样率；nil 表示保持源采样率。
     var audioSampleRate: Double?
+    /// ProRes 输出的 PCM 位深（16 / 24）；nil 表示 AAC。
+    var audioPCMSampleBitDepth: Int?
     /// 强制硬件编码（设计文档硬性要求，默认 true）。
     var requireHardware: Bool
     /// 指定硬件编码器 ID；nil 表示由系统选择（仍带 Require 标志）。
@@ -56,6 +70,7 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
     case notPlayable
     case protectedContent
     case hdrUnsupported(String)
+    case proResRequiresMOV
     case hardwareDecodeUnavailable(String)
     case hardwareEncoderUnavailable(String)
     case lowDiskSpace(requiredBytes: Int64, availableBytes: Int64)
@@ -78,6 +93,8 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
             "输入包含受保护内容（DRM），无法转码。"
         case .hdrUnsupported(let label):
             "检测到 \(label) 视频：v1 暂不支持 HDR，已拒绝以避免输出偏色。"
+        case .proResRequiresMOV:
+            "ProRes 仅支持 QuickTime（MOV）容器；请在预设中选择 MOV。"
         case .hardwareDecodeUnavailable(let codec):
             "源视频编码 \(codec) 没有硬件解码器；v1 不会静默软件解码，已拒绝。"
         case .hardwareEncoderUnavailable(let codec):

@@ -390,14 +390,24 @@ final class QueueStore {
             resolution: job.preset.resolution,
             frameRate: job.preset.frameRate,
             averageBitrate: job.preset.videoCodec.isProRes
+                || job.preset.bitrateMode != .targetBitrate
                 ? nil
                 : job.preset.averageBitrate(
                     videoWidth: Int(targetSize.width),
                     videoHeight: Int(targetSize.height)
                 ),
+            bitrateMode: job.preset.bitrateMode,
+            quality: job.preset.quality,
+            targetSizeBytes: job.preset.bitrateMode == .targetSize && !job.preset.videoCodec.isProRes
+                ? Int64(job.preset.targetSizeMB) * 1_000_000
+                : nil,
+            bitrateRange: job.preset.bitrateRange,
+            keyframeInterval: job.preset.keyframeInterval,
+            profile: job.preset.profile,
             audioBitrate: job.preset.audio.bitrate,
             audioMaxChannels: job.preset.audio.maxChannels,
             audioSampleRate: job.preset.audio.sampleRateOverride,
+            audioPCMSampleBitDepth: job.preset.audio.pcmBitDepth,
             requireHardware: true,
             encoderID: encoder.encoderID,
             metadata: job.movieMetadata,

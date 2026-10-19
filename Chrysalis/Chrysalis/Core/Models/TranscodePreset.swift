@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import VideoToolbox
 
 /// v1 支持的输出视频编码（设计文档 §3 支持矩阵）。
 enum VideoCodec: String, Sendable, CaseIterable, Codable {
@@ -209,7 +210,97 @@ enum FrameRateSetting: String, Sendable, Codable, CaseIterable {
     }
 }
 
-/// 音频策略：MP4/MOV 统一转 AAC-LC（设计文档 §6.3）。
+/// 码率控制方式（设计文档 P4）。
+enum BitrateMode: String, Sendable, Codable, CaseIterable {
+    /// 平均码率（P2/P3.5 行为）：按 1080p 基准缩放并夹取。
+    case targetBitrate
+    /// 质量优先：`AVVideoQualityKey`，编码器按内容分配码率（体积浮动）。
+    case quality
+    /// 目标大小：每个输出文件约 N MB，按时长与音频扣除换算码率。
+    case targetSize
+
+    var displayName: String {
+        switch self {
+        case .targetBitrate: "平均码率"
+        case .quality: "质量优先"
+        case .targetSize: "目标大小"
+        }
+    }
+}
+
+/// 关键帧间隔（设计文档 P4）：折算为「秒 × 输出帧率」。
+enum KeyframeIntervalSetting: String, Sendable, Codable, CaseIterable {
+    case auto
+    case s1
+    case s2
+    case s5
+    case s10
+
+    var displayName: String {
+        switch self {
+        case .auto: "自动（2 秒）"
+        case .s1: "1 秒"
+        case .s2: "2 秒"
+        case .s5: "5 秒"
+        case .s10: "10 秒"
+        }
+    }
+
+    /// 间隔秒数；`auto` 为 2 秒（P2/P3.5 行为：帧率 × 2）。
+    var seconds: Double {
+        switch self {
+        case .auto, .s2: 2
+        case .s1: 1
+        case .s5: 5
+        case .s10: 10
+        }
+    }
+
+    /// 摘要短名（“自动（2 秒）”→“关键帧 2 秒”）。
+    var summaryLabel: String {
+        self == .auto ? "关键帧自动" : "关键帧 \(Int(seconds)) 秒"
+    }
+}
+
+/// H.264 Profile（设计文档 P4）；HEVC 仅 Main（自动），ProRes 不适用。
+enum VideoProfileSetting: String, Sendable, Codable, CaseIterable {
+    case auto
+    case baseline
+    case main
+    case high
+
+    var displayName: String {
+        switch self {
+        case .auto: "自动"
+        case .baseline: "Baseline"
+        case .main: "Main"
+        case .high: "High"
+        }
+    }
+
+    /// 该编码可选的 Profile 档位（HEVC 与 ProRes 只有「自动」）。
+    static func choices(for codec: VideoCodec) -> [VideoProfileSetting] {
+        codec == .h264 ? allCases : [.auto]
+    }
+
+    /// 写入 `AVVideoProfileLevelKey` 的值；ProRes 不适用返回 nil。
+    func profileLevel(for codec: VideoCodec) -> String? {
+        switch codec {
+        case .h264:
+            switch self {
+            case .auto, .high: AVVideoProfileLevelH264HighAutoLevel
+            case .main: AVVideoProfileLevelH264MainAutoLevel
+            case .baseline: AVVideoProfileLevelH264BaselineAutoLevel
+            }
+        case .hevc:
+            kVTProfileLevel_HEVC_Main_AutoLevel as String
+        default:
+            nil
+        }
+    }
+}
+
+/// 音频策略：MP4/MOV 统一转 AAC-LC（设计文档 §6.3）；ProRes MOV 用 PCM。
 struct AudioPolicy: Sendable, Equatable, Codable {
     /// AAC 码率（bps）。
     var bitrate: Int
@@ -217,12 +308,38 @@ struct AudioPolicy: Sendable, Equatable, Codable {
     var sampleRateOverride: Double?
     /// v1 只输出单声道/立体声（5.1 下混留待 v1.1）。
     var maxChannels: Int
+    /// ProRes 输出的 PCM 位深（16 / 24）；nil 表示 AAC（按 `bitrate` 编码）。
+    var pcmBitDepth: Int? = nil
 
     /// 自定义预设可选的音频码率（设计文档 §6.3 / §6.6；320 为系统编码器上限）。
     static let bitrateChoices = [96_000, 128_000, 192_000, 256_000, 320_000]
 
     /// 可覆盖的采样率（设计文档 P3.5）：44.1 / 48 kHz；其他源采样率规整到 48 kHz。
     static let sampleRateChoices: [Double] = [44_100, 48_000]
+
+    /// ProRes 可选的 PCM 位深（设计文档 §6.3）。
+    static let pcmBitDepthChoices = [16, 24]
+
+    /// 是否输出 PCM（ProRes）。
+    var isPCM: Bool { pcmBitDepth != nil }
+
+    /// 编码口径文案，如 “AAC 192 kbps” / “PCM 16-bit”。
+    var codecLabel: String {
+        if let pcmBitDepth { return "PCM \(pcmBitDepth)-bit" }
+        return "AAC \(bitrate / 1000) kbps"
+    }
+
+    /// 估算/磁盘预检用音频码率（bps）；PCM 未指定采样率时按 48 kHz 基准。
+    func estimatedBitsPerSecond() -> Int {
+        guard let pcmBitDepth else {
+            return Self.effectiveBitrate(bitrate, channels: maxChannels)
+        }
+        return BitratePlanner.pcmBitrate(
+            sampleRate: sampleRateOverride ?? 48_000,
+            channels: maxChannels,
+            bitDepth: pcmBitDepth
+        )
+    }
 
     /// 立体声 AAC 默认策略。
     static func stereoAAC(bitrate: Int) -> AudioPolicy {
@@ -280,15 +397,27 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
     var bitrate1080p: Int
     /// 平均码率夹取范围（bps）；自定义预设继承来源预置的范围并随基准码率等比缩放。
     var bitrateRange: ClosedRange<Int>
+    /// 码率控制方式（P4）；ProRes 不适用（固定为编码档位码率）。
+    var bitrateMode: BitrateMode = .targetBitrate
+    /// 质量优先的质量值（0.05–1.0；仅 `bitrateMode == .quality` 生效）。
+    var quality: Double = 0.65
+    /// 目标大小（MB / 每个输出文件；仅 `bitrateMode == .targetSize` 生效）。
+    var targetSizeMB: Int = 700
+    /// 关键帧间隔（H.264 / HEVC；ProRes 帧内编码不适用）。
+    var keyframeInterval: KeyframeIntervalSetting = .auto
+    /// H.264 Profile；HEVC / ProRes 仅「自动」。
+    var profile: VideoProfileSetting = .auto
 
     var isBuiltIn: Bool { builtInKind != nil }
 
     private enum CodingKeys: String, CodingKey {
         case builtInKind, id, name, videoCodec, container, resolution, frameRate
         case audio, bitrate1080p, bitrateRange
+        case bitrateMode, quality, targetSizeMB, keyframeInterval, profile
     }
 
-    /// 向后兼容解码：P3.5 之前的 presets.json 没有 resolution / frameRate，缺省「保持源」。
+    /// 向后兼容解码：P3.5 之前的 presets.json 没有 resolution / frameRate，缺省「保持源」；
+    /// P4 之前的没有码率模式/关键帧/Profile，缺省「平均码率 / 自动 / 自动」。
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         builtInKind = try values.decodeIfPresent(Kind.self, forKey: .builtInKind)
@@ -301,6 +430,11 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
         audio = try values.decode(AudioPolicy.self, forKey: .audio)
         bitrate1080p = try values.decode(Int.self, forKey: .bitrate1080p)
         bitrateRange = try values.decode(ClosedRange<Int>.self, forKey: .bitrateRange)
+        bitrateMode = try values.decodeIfPresent(BitrateMode.self, forKey: .bitrateMode) ?? .targetBitrate
+        quality = try values.decodeIfPresent(Double.self, forKey: .quality) ?? 0.65
+        targetSizeMB = try values.decodeIfPresent(Int.self, forKey: .targetSizeMB) ?? 700
+        keyframeInterval = try values.decodeIfPresent(KeyframeIntervalSetting.self, forKey: .keyframeInterval) ?? .auto
+        profile = try values.decodeIfPresent(VideoProfileSetting.self, forKey: .profile) ?? .auto
     }
 
     private init(
@@ -313,7 +447,12 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
         frameRate: FrameRateSetting = .source,
         audio: AudioPolicy,
         bitrate1080p: Int,
-        bitrateRange: ClosedRange<Int>
+        bitrateRange: ClosedRange<Int>,
+        bitrateMode: BitrateMode = .targetBitrate,
+        quality: Double = 0.65,
+        targetSizeMB: Int = 700,
+        keyframeInterval: KeyframeIntervalSetting = .auto,
+        profile: VideoProfileSetting = .auto
     ) {
         self.id = id
         self.builtInKind = builtInKind
@@ -325,6 +464,11 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
         self.audio = audio
         self.bitrate1080p = bitrate1080p
         self.bitrateRange = bitrateRange
+        self.bitrateMode = bitrateMode
+        self.quality = quality
+        self.targetSizeMB = targetSizeMB
+        self.keyframeInterval = keyframeInterval
+        self.profile = profile
     }
 
     private static func builtIn(
@@ -358,7 +502,12 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
             frameRate: preset.frameRate,
             audio: preset.audio,
             bitrate1080p: preset.bitrate1080p,
-            bitrateRange: preset.bitrateRange
+            bitrateRange: preset.bitrateRange,
+            bitrateMode: preset.bitrateMode,
+            quality: preset.quality,
+            targetSizeMB: preset.targetSizeMB,
+            keyframeInterval: preset.keyframeInterval,
+            profile: preset.profile
         )
     }
 
@@ -396,8 +545,27 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
         bitrateRange: 4_000_000...40_000_000
     )
 
-    /// P2 内置列表（「剪辑用 ProRes」随 P4 的 ProRes + MOV 支持加入）。
-    static let builtIns: [TranscodePreset] = [.compatible, .balanced, .compact, .highQuality]
+    /// 「剪辑用 ProRes」（设计文档 §6.6）：ProRes 422 + MOV + PCM 16-bit 48 kHz。
+    static let editingProRes = TranscodePreset(
+        id: Kind.editingProRes.rawValue,
+        builtInKind: .editingProRes,
+        name: Kind.editingProRes.displayName,
+        videoCodec: .proRes422,
+        container: .mov,
+        audio: AudioPolicy(
+            bitrate: 192_000,
+            sampleRateOverride: nil,
+            maxChannels: 2,
+            pcmBitDepth: 16
+        ),
+        bitrate1080p: 147_000_000,
+        bitrateRange: 40_000_000...400_000_000
+    )
+
+    /// P2 内置列表 + P4「剪辑用 ProRes」。
+    static let builtIns: [TranscodePreset] = [
+        .compatible, .balanced, .compact, .highQuality, .editingProRes,
+    ]
 
     /// 默认预设：兼容优先。
     static let defaultPreset = TranscodePreset.compatible
@@ -408,40 +576,123 @@ struct TranscodePreset: Identifiable, Sendable, Equatable, Codable {
         "\(videoCodec.displayName) · \(container.displayName) · \(resolution.summaryLabel) · \(frameRate.summaryLabel)"
     }
 
-    /// 音频口径行，如 “AAC 192 kbps · 立体声 · 保持源”。
+    /// 音频口径行，如 “AAC 192 kbps · 立体声 · 保持源” / “PCM 16-bit · 立体声 · 保持源”。
     var audioSummary: String {
-        "AAC \(audio.bitrate / 1000) kbps · \(audio.channelLabel) · \(audio.sampleRateLabel)"
+        "\(audio.codecLabel) · \(audio.channelLabel) · \(audio.sampleRateLabel)"
     }
 
-    /// 基准码率行，如 “基准 8 Mbps @1080p”。
+    /// 码率口径行：平均码率 / 质量优先 / 目标大小 / ProRes 固定码率。
     var bitrateLabel: String {
-        "基准 \(Fmt.mbps(bitrate1080p)) @1080p"
+        if videoCodec.isProRes {
+            return "ProRes 固定码率（1080p30 ≈ \(Fmt.mbps(averageBitrate(videoWidth: 1920, videoHeight: 1080)))）"
+        }
+        switch bitrateMode {
+        case .targetBitrate:
+            return "基准 \(Fmt.mbps(bitrate1080p)) @1080p"
+        case .quality:
+            return "质量 \(String(format: "%.2f", quality))（体积随内容浮动）"
+        case .targetSize:
+            return "目标大小 ≈ \(targetSizeMB) MB / 文件"
+        }
     }
 
-    /// 夹取范围行，如 “2.5–12 Mbps”。
+    /// 夹取范围行，如 “2.5–12 Mbps”；ProRes 不适用。
     var bitrateRangeLabel: String {
-        "\(Fmt.mbpsNumber(bitrateRange.lowerBound))–\(Fmt.mbps(bitrateRange.upperBound))"
+        if videoCodec.isProRes { return "—" }
+        return "\(Fmt.mbpsNumber(bitrateRange.lowerBound))–\(Fmt.mbps(bitrateRange.upperBound))"
     }
 
-    /// 预计输出大小（字节）；仅估算，接受 ±20%（设计文档 §12）。
-    func estimatedBytes(durationSeconds: Double, videoWidth: Int, videoHeight: Int) -> Int64 {
-        let videoBits = Double(averageBitrate(videoWidth: videoWidth, videoHeight: videoHeight)) * durationSeconds
-        let audioBits = Double(AudioPolicy.effectiveBitrate(audio.bitrate, channels: audio.maxChannels)) * durationSeconds
+    /// 卡片第二行：音频 · 码率口径（非 ProRes 追加夹取范围）。
+    var detailLabel: String {
+        if videoCodec.isProRes {
+            return "\(audioSummary) · \(bitrateLabel)"
+        }
+        return "\(audioSummary) · \(bitrateLabel) · 夹取 \(bitrateRangeLabel)"
+    }
+
+    /// 预计输出大小（字节）；仅估算，接受内容相关偏差（设计文档 §12 / P3.5）。
+    func estimatedBytes(
+        durationSeconds: Double,
+        videoWidth: Int,
+        videoHeight: Int,
+        frameRate: Double = 30
+    ) -> Int64 {
+        if videoCodec.isProRes {
+            let videoBits = Double(nominalVideoBitrate(
+                videoWidth: videoWidth,
+                videoHeight: videoHeight,
+                frameRate: frameRate
+            )) * durationSeconds
+            let audioBits = Double(audio.estimatedBitsPerSecond()) * durationSeconds
+            return Int64((videoBits + audioBits) / 8.0 * 1.05)
+        }
+        // 目标大小模式：目标即文件总大小（音频已计入换算），不再叠加码率估算。
+        if bitrateMode == .targetSize {
+            return Int64(targetSizeMB) * 1_000_000
+        }
+        let videoBits = Double(nominalVideoBitrate(
+            videoWidth: videoWidth,
+            videoHeight: videoHeight,
+            frameRate: frameRate
+        )) * durationSeconds
+        let audioBits = Double(audio.estimatedBitsPerSecond()) * durationSeconds
         return Int64((videoBits + audioBits) / 8.0 * 1.05)
     }
 
     /// 预设卡片的估算基准：所选分辨率 · 1 小时（保持源按 1080p 基准估算）。
     var hourlyEstimateLabel: String {
+        if !videoCodec.isProRes, bitrateMode == .targetSize {
+            return "每个文件 ≈ \(targetSizeMB) MB"
+        }
         let dims = resolution.estimateDimensions
         let bytes = estimatedBytes(durationSeconds: 3600, videoWidth: dims.width, videoHeight: dims.height)
-        return "\(resolution.estimateBasisLabel) · 1 小时 ≈ \(Fmt.bytes(bytes))"
+        let suffix = bitrateMode == .quality && !videoCodec.isProRes ? "（按质量推测）" : ""
+        return "\(resolution.estimateBasisLabel) · 1 小时 ≈ \(Fmt.bytes(bytes))\(suffix)"
     }
 
-    /// 按输出像素数估算平均码率（1080p 为基准，按预设范围夹取）。
-    func averageBitrate(videoWidth: Int, videoHeight: Int) -> Int {
-        let pixels = Double(max(videoWidth, 2) * max(videoHeight, 2))
-        let scale = pixels / (1920.0 * 1080.0)
-        let raw = Double(bitrate1080p) * scale
-        return Int(min(max(raw, Double(bitrateRange.lowerBound)), Double(bitrateRange.upperBound)))
+    /// 输出视频的名义码率（UI 估算与磁盘预检用；ProRes 按时长外的像素/帧率换算）。
+    func nominalVideoBitrate(videoWidth: Int, videoHeight: Int, frameRate: Double = 30) -> Int {
+        if videoCodec.isProRes {
+            return BitratePlanner.proResDataRate(
+                codec: videoCodec,
+                width: videoWidth,
+                height: videoHeight,
+                fps: frameRate
+            )
+        }
+        switch bitrateMode {
+        case .targetBitrate, .targetSize:
+            return BitratePlanner.scaled(
+                base1080p: bitrate1080p,
+                range: bitrateRange,
+                width: videoWidth,
+                height: videoHeight
+            )
+        case .quality:
+            return BitratePlanner.nominalQuality(
+                codec: videoCodec,
+                quality: quality,
+                width: videoWidth,
+                height: videoHeight
+            )
+        }
+    }
+
+    /// 按输出像素数估算平均码率（1080p 为基准，按预设范围夹取）；ProRes 返回档位标称数据率。
+    func averageBitrate(videoWidth: Int, videoHeight: Int, frameRate: Double = 30) -> Int {
+        if videoCodec.isProRes {
+            return BitratePlanner.proResDataRate(
+                codec: videoCodec,
+                width: videoWidth,
+                height: videoHeight,
+                fps: frameRate
+            )
+        }
+        return BitratePlanner.scaled(
+            base1080p: bitrate1080p,
+            range: bitrateRange,
+            width: videoWidth,
+            height: videoHeight
+        )
     }
 }

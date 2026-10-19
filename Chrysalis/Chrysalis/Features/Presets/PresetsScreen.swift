@@ -116,7 +116,7 @@ struct PresetCard: View {
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
 
-            Text("\(preset.audioSummary) · \(preset.bitrateLabel)，夹取 \(preset.bitrateRangeLabel)")
+            Text(preset.detailLabel)
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(2)

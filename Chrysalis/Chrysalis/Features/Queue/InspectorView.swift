@@ -171,18 +171,24 @@ struct InspectorView: View {
             InspectorRow(label: "分辨率", value: resolutionLabel(job))
             InspectorRow(label: "帧率", value: frameRateLabel(job))
             if let dims = targetDimensions(job) {
-                let bitrate = job.preset.averageBitrate(videoWidth: dims.width, videoHeight: dims.height)
-                InspectorRow(label: "码率", value: "\(Fmt.mbps(bitrate))（按像素缩放）")
+                InspectorRow(label: "码率", value: bitrateLabel(job, dims: dims))
+            }
+            if !job.preset.videoCodec.isProRes {
+                InspectorRow(label: "关键帧", value: job.preset.keyframeInterval.displayName)
+            }
+            if job.preset.videoCodec == .h264, job.preset.profile != .auto {
+                InspectorRow(label: "Profile", value: job.preset.profile.displayName)
             }
             InspectorRow(
                 label: "音频",
-                value: "AAC \(job.preset.audio.bitrate / 1000) kbps · \(job.preset.audio.channelLabel)"
+                value: "\(job.preset.audio.codecLabel) · \(job.preset.audio.channelLabel)"
             )
             if let info = job.mediaInfo, let dims = targetDimensions(job) {
                 let estimate = job.preset.estimatedBytes(
                     durationSeconds: info.durationSeconds,
                     videoWidth: dims.width,
-                    videoHeight: dims.height
+                    videoHeight: dims.height,
+                    frameRate: info.video?.frameRate ?? 30
                 )
                 InspectorRow(label: "预计大小", value: "≈ \(Fmt.bytes(estimate))")
             }
@@ -206,7 +212,29 @@ struct InspectorView: View {
         }
     }
 
-    // MARK: 输出辅助（P3.5）
+    // MARK: 输出辅助（P3.5 / P4）
+
+    /// 码率口径行：平均码率 / 质量优先 / 目标大小 / ProRes 标称。
+    private func bitrateLabel(_ job: TranscodeJob, dims: (width: Int, height: Int)) -> String {
+        let preset = job.preset
+        if preset.videoCodec.isProRes {
+            let rate = preset.averageBitrate(
+                videoWidth: dims.width,
+                videoHeight: dims.height,
+                frameRate: job.mediaInfo?.video?.frameRate ?? 30
+            )
+            return "ProRes 标称 \(Fmt.mbps(rate))"
+        }
+        switch preset.bitrateMode {
+        case .targetBitrate:
+            let bitrate = preset.averageBitrate(videoWidth: dims.width, videoHeight: dims.height)
+            return "\(Fmt.mbps(bitrate))（按像素缩放）"
+        case .quality:
+            return "质量优先 \(String(format: "%.2f", preset.quality))"
+        case .targetSize:
+            return "目标 ≈ \(preset.targetSizeMB) MB / 文件"
+        }
+    }
 
     /// 目标输出尺寸（短边匹配、只缩不放）；无媒体信息时返回 nil。
     private func targetDimensions(_ job: TranscodeJob) -> (width: Int, height: Int)? {

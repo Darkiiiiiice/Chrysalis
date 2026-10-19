@@ -121,11 +121,10 @@ actor TranscodeEngine {
         if request.requireHardware, request.encoderID == nil {
             throw TranscodeEngineError.hardwareEncoderUnavailable(request.videoCodec.displayName)
         }
-
-        // 磁盘空间：估算值 + 200 MB 缓冲（设计文档 §6.1 第 9 条）
-        let bitrateSum = Int64(request.averageBitrate ?? 12_000_000) + Int64(request.audioBitrate)
-        let estimatedBytes = bitrateSum / 8 * Int64(max(info.durationSeconds, 0)) + 200 * 1_048_576
-        try checkDiskSpace(directory: outputDirectory, requiredBytes: estimatedBytes)
+        // ProRes 仅支持 MOV（设计文档 §3 支持矩阵；预设层已归一，此处兜底）
+        if request.videoCodec.isProRes, request.container != .mov {
+            throw TranscodeEngineError.proResRequiresMOV
+        }
 
         let asset = AVURLAsset(url: request.inputURL)
         let duration: CMTime
@@ -256,9 +255,14 @@ actor TranscodeEngine {
             if roundedRate != 44_100, roundedRate != 48_000 {
                 rate = 48_000
             }
-            let bitrate = AudioPolicy.effectiveBitrate(request.audioBitrate, channels: channels)
-            if bitrate != request.audioBitrate {
-                notes.append("单声道音频码率上限 256 kbps，已从 \(request.audioBitrate / 1000) kbps 调整")
+            var bitrate = request.audioBitrate
+            if request.audioPCMSampleBitDepth == nil {
+                // 单声道 AAC 上限 256 kbps（实测 320 被系统编码器拒绝）；PCM 不按码率编码。
+                let clamped = AudioPolicy.effectiveBitrate(request.audioBitrate, channels: channels)
+                if clamped != request.audioBitrate {
+                    notes.append("单声道音频码率上限 256 kbps，已从 \(request.audioBitrate / 1000) kbps 调整")
+                }
+                bitrate = clamped
             }
             audioTarget = (rate, channels, bitrate)
 
@@ -279,6 +283,76 @@ actor TranscodeEngine {
             }
         }
 
+        // MARK: 码率规划与磁盘预检（设计文档 §6.1 第 9 条 / P4）
+
+        let audioNominalBitrate: Int
+        if let target = audioTarget, audioOutput != nil {
+            if let depth = request.audioPCMSampleBitDepth {
+                audioNominalBitrate = BitratePlanner.pcmBitrate(
+                    sampleRate: target.rate,
+                    channels: target.channels,
+                    bitDepth: depth
+                )
+            } else {
+                audioNominalBitrate = target.bitrate
+            }
+        } else {
+            audioNominalBitrate = 0
+        }
+
+        let durationSecondsPre = max(duration.seconds.isFinite ? duration.seconds : 0, 0)
+        var effectiveVideoBitrate: Int?
+        let nominalVideoBitrate: Int
+        if request.videoCodec.isProRes {
+            // ProRes 帧内编码：码率由档位与像素/帧率决定，不设码率键。
+            effectiveVideoBitrate = nil
+            nominalVideoBitrate = BitratePlanner.proResDataRate(
+                codec: request.videoCodec,
+                width: Int(renderSize.width),
+                height: Int(renderSize.height),
+                fps: outputFPS
+            )
+        } else {
+            switch request.bitrateMode {
+            case .targetBitrate:
+                effectiveVideoBitrate = request.averageBitrate
+                nominalVideoBitrate = request.averageBitrate ?? 12_000_000
+            case .quality:
+                // 质量模式：编码器按内容分配码率，只给名义值供预检与提示。
+                effectiveVideoBitrate = nil
+                nominalVideoBitrate = BitratePlanner.nominalQuality(
+                    codec: request.videoCodec,
+                    quality: request.quality,
+                    width: Int(renderSize.width),
+                    height: Int(renderSize.height)
+                )
+            case .targetSize:
+                if let targetBytes = request.targetSizeBytes,
+                   let result = BitratePlanner.targetSizeVideoBitrate(
+                       targetBytes: targetBytes,
+                       durationSeconds: durationSecondsPre,
+                       audioBitrate: audioNominalBitrate,
+                       range: request.bitrateRange
+                   ) {
+                    effectiveVideoBitrate = result.videoBitrate
+                    nominalVideoBitrate = result.videoBitrate
+                    if result.clamped {
+                        notes.append("目标大小换算码率超出预设范围，已按 \(Fmt.mbps(result.videoBitrate)) 编码")
+                    }
+                } else {
+                    effectiveVideoBitrate = request.averageBitrate
+                    nominalVideoBitrate = request.averageBitrate ?? 12_000_000
+                    notes.append("无法按时长换算目标大小，已按平均码率编码")
+                }
+            }
+        }
+
+        var requiredBytes = Int64(nominalVideoBitrate + audioNominalBitrate) / 8 * Int64(durationSecondsPre)
+        if request.bitrateMode == .targetSize, !request.videoCodec.isProRes, let targetBytes = request.targetSizeBytes {
+            requiredBytes = max(requiredBytes, targetBytes)
+        }
+        try checkDiskSpace(directory: outputDirectory, requiredBytes: requiredBytes + 200 * 1_048_576)
+
         // MARK: 写入端
         let tempURL = OutputPlanner.makeTempURL(in: outputDirectory)
         let writer: AVAssetWriter
@@ -290,7 +364,12 @@ actor TranscodeEngine {
 
         let videoInput = AVAssetWriterInput(
             mediaType: .video,
-            outputSettings: videoOutputSettings(request: request, size: renderSize, fps: outputFPS)
+            outputSettings: videoOutputSettings(
+                request: request,
+                size: renderSize,
+                fps: outputFPS,
+                targetBitrate: effectiveVideoBitrate
+            )
         )
         guard writer.canAdd(videoInput) else {
             throw TranscodeEngineError.writerSetupFailed("无法添加视频写入器（可能是硬件编码器不可用）")
@@ -298,12 +377,26 @@ actor TranscodeEngine {
 
         var audioInput: AVAssetWriterInput?
         if let target = audioTarget, audioOutput != nil {
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVEncoderBitRateKey: target.bitrate,
-                AVSampleRateKey: target.rate,
-                AVNumberOfChannelsKey: target.channels,
-            ]
+            let audioSettings: [String: Any]
+            if let bitDepth = request.audioPCMSampleBitDepth {
+                // ProRes MOV：PCM（设计文档 §6.3）
+                audioSettings = [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVSampleRateKey: target.rate,
+                    AVNumberOfChannelsKey: target.channels,
+                    AVLinearPCMBitDepthKey: bitDepth,
+                    AVLinearPCMIsFloatKey: false,
+                    AVLinearPCMIsBigEndianKey: false,
+                    AVLinearPCMIsNonInterleaved: false,
+                ]
+            } else {
+                audioSettings = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVEncoderBitRateKey: target.bitrate,
+                    AVSampleRateKey: target.rate,
+                    AVNumberOfChannelsKey: target.channels,
+                ]
+            }
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             if writer.canAdd(input) {
                 audioInput = input
@@ -317,8 +410,10 @@ actor TranscodeEngine {
         let videoReceiver = writer.inputReceiver(for: videoInput)
         let audioReceiver = audioInput.map { writer.inputReceiver(for: $0) }
 
-        // 电影元数据（设计文档 §7.5）：必须在 start() 之前设置
+        // 元数据（设计文档 §6.5 / §7.5）：必须在 start() 之前设置
+        let preservedMetadata: MetadataWriter.PreservedMetadata?
         if let metadata = request.metadata {
+            preservedMetadata = nil
             writer.metadata = MetadataWriter.items(
                 container: request.container,
                 metadata: metadata,
@@ -326,6 +421,13 @@ actor TranscodeEngine {
             )
             if metadata.posterPath != nil, request.posterData == nil {
                 notes.append("海报未获取，已跳过")
+            }
+        } else {
+            // 非电影任务：保留源标题/作者/创建日期/简介
+            let preserved = await MetadataWriter.readPreserved(from: request.inputURL)
+            preservedMetadata = preserved
+            if !preserved.isEmpty {
+                writer.metadata = MetadataWriter.items(container: request.container, preserved: preserved)
             }
         }
 
@@ -490,7 +592,8 @@ actor TranscodeEngine {
             url: finalURL,
             expectedDuration: durationSeconds,
             expectedCodec: request.videoCodec,
-            expectedSize: renderSize
+            expectedSize: renderSize,
+            expectedAudioPCMBitDepth: request.audioPCMSampleBitDepth
         )
         if let metadata = request.metadata {
             verificationIssues += await MetadataWriter.verificationIssues(
@@ -498,6 +601,12 @@ actor TranscodeEngine {
                 container: request.container,
                 metadata: metadata,
                 expectsArtwork: request.posterData != nil
+            )
+        } else if let preservedMetadata, !preservedMetadata.isEmpty {
+            verificationIssues += await MetadataWriter.preservationIssues(
+                url: finalURL,
+                container: request.container,
+                expected: preservedMetadata
             )
         }
 
@@ -515,7 +624,12 @@ actor TranscodeEngine {
 
     // MARK: - 输出设置
 
-    private static func videoOutputSettings(request: TranscodeRequest, size: CGSize, fps: Double) -> [String: Any] {
+    private static func videoOutputSettings(
+        request: TranscodeRequest,
+        size: CGSize,
+        fps: Double,
+        targetBitrate: Int?
+    ) -> [String: Any] {
         let even = VideoGeometry.evenSize(size)
         var output: [String: Any] = [
             AVVideoCodecKey: request.videoCodec.avCodecType,
@@ -529,18 +643,22 @@ actor TranscodeEngine {
         ]
 
         var compression: [String: Any] = [:]
-        if let bitrate = request.averageBitrate, !request.videoCodec.isProRes {
-            compression[AVVideoAverageBitRateKey] = bitrate
-            compression[AVVideoMaxKeyFrameIntervalKey] = Int(fps.rounded()) * 2
-            compression[AVVideoExpectedSourceFrameRateKey] = Int(fps.rounded())
-        }
-        switch request.videoCodec {
-        case .h264:
-            compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
-        case .hevc:
-            compression[AVVideoProfileLevelKey] = kVTProfileLevel_HEVC_Main_AutoLevel as String
-        default:
-            break
+        if !request.videoCodec.isProRes {
+            switch request.bitrateMode {
+            case .quality:
+                compression[AVVideoQualityKey] = min(max(request.quality, 0.05), 1.0)
+            case .targetBitrate, .targetSize:
+                if let targetBitrate {
+                    compression[AVVideoAverageBitRateKey] = targetBitrate
+                }
+            }
+            let fpsInt = max(Int(fps.rounded()), 1)
+            let keyframeFrames = Int((request.keyframeInterval.seconds * Double(fpsInt)).rounded())
+            compression[AVVideoMaxKeyFrameIntervalKey] = max(keyframeFrames, 1)
+            compression[AVVideoExpectedSourceFrameRateKey] = fpsInt
+            if let profileLevel = request.profile.profileLevel(for: request.videoCodec) {
+                compression[AVVideoProfileLevelKey] = profileLevel
+            }
         }
         if !compression.isEmpty {
             output[AVVideoCompressionPropertiesKey] = compression
@@ -573,7 +691,8 @@ actor TranscodeEngine {
         url: URL,
         expectedDuration: Double,
         expectedCodec: VideoCodec,
-        expectedSize: CGSize
+        expectedSize: CGSize,
+        expectedAudioPCMBitDepth: Int? = nil
     ) async -> [String] {
         var issues: [String] = []
         let asset = AVURLAsset(url: url)
@@ -602,6 +721,21 @@ actor TranscodeEngine {
         }
         if !codecFourCC.isEmpty, codecFourCC != expectedCodec.fourCC {
             issues.append("编码为 \(codecFourCC)（期望 \(expectedCodec.fourCC)）")
+        }
+        if let expectedAudioPCMBitDepth {
+            if let audioTrack = tracks.first(where: { $0.mediaType == .audio }) {
+                if let format = (try? await audioTrack.load(.formatDescriptions))?.first {
+                    let subType = CMFormatDescriptionGetMediaSubType(format)
+                    if subType != kAudioFormatLinearPCM {
+                        issues.append("音频编码 \(VideoToolboxCapabilities.fourCCString(subType))（期望 PCM）")
+                    } else if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+                              Int(asbd.mBitsPerChannel) != expectedAudioPCMBitDepth {
+                        issues.append("PCM 位深 \(asbd.mBitsPerChannel)（期望 \(expectedAudioPCMBitDepth)）")
+                    }
+                }
+            } else {
+                issues.append("输出缺少音频轨（期望 PCM）")
+            }
         }
         return issues
     }

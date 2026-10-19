@@ -114,6 +114,101 @@ enum MetadataWriter {
         return issues
     }
 
+    // MARK: - 非电影任务：保留源常见元数据（设计文档 §6.5）
+
+    /// 源文件可保留的常见元数据（标题 / 作者 / 创建日期 / 简介）。
+    struct PreservedMetadata: Sendable, Equatable {
+        var title: String?
+        var artist: String?
+        var creationDate: String?
+        var description: String?
+
+        var isEmpty: Bool {
+            title == nil && artist == nil && creationDate == nil && description == nil
+        }
+    }
+
+    /// 读取源文件的常见元数据（AVAsset 会把各容器字段归一为 common key）。
+    static func readPreserved(from url: URL) async -> PreservedMetadata {
+        let asset = AVURLAsset(url: url)
+        guard let items = try? await asset.load(.commonMetadata) else { return PreservedMetadata() }
+        // 注意：commonMetadata 条目的 identifier 仍保留容器写法（如 itsk/©nam），
+        // 归一化信息在 commonKey 上，因此按 commonKey 匹配。
+        func string(_ key: AVMetadataKey) async -> String? {
+            guard let item = items.first(where: { $0.commonKey == key }) else { return nil }
+            return try? await item.load(.stringValue)
+        }
+        let title = await string(.commonKeyTitle)
+        let artist = await string(.commonKeyArtist)
+        let author = await string(.commonKeyAuthor)
+        let creator = await string(.commonKeyCreator)
+        let creationDate = await string(.commonKeyCreationDate)
+        let description = await string(.commonKeyDescription)
+        return PreservedMetadata(
+            title: nonEmpty(title),
+            artist: nonEmpty(artist) ?? nonEmpty(author) ?? nonEmpty(creator),
+            creationDate: nonEmpty(creationDate),
+            description: nonEmpty(description)
+        )
+    }
+
+    /// 源常见元数据 → 输出容器字段。
+    static func items(container: MediaContainer, preserved: PreservedMetadata) -> [AVMetadataItem] {
+        var items: [AVMetadataItem] = []
+        switch container {
+        case .mp4:
+            if let title = preserved.title { items.append(stringItem(.iTunesMetadataSongName, title)) }
+            if let artist = preserved.artist { items.append(stringItem(.iTunesMetadataArtist, artist)) }
+            if let date = preserved.creationDate { items.append(stringItem(.iTunesMetadataReleaseDate, date)) }
+            if let description = preserved.description {
+                items.append(stringItem(.iTunesMetadataDescription, description))
+            }
+        case .mov:
+            if let title = preserved.title { items.append(stringItem(.quickTimeMetadataTitle, title)) }
+            if let artist = preserved.artist { items.append(stringItem(.quickTimeMetadataArtist, artist)) }
+            if let date = preserved.creationDate {
+                items.append(stringItem(.quickTimeMetadataCreationDate, date))
+            }
+            if let description = preserved.description {
+                items.append(stringItem(.quickTimeMetadataDescription, description))
+            }
+        }
+        return items
+    }
+
+    /// 非电影任务写入后自检：源里有的字段必须在输出中读回。
+    static func preservationIssues(
+        url: URL,
+        container: MediaContainer,
+        expected: PreservedMetadata
+    ) async -> [String] {
+        guard !expected.isEmpty else { return [] }
+        let asset = AVURLAsset(url: url)
+        guard let items = try? await asset.load(.metadata) else {
+            return ["元数据读回失败"]
+        }
+        var issues: [String] = []
+        func missing(_ identifier: AVMetadataIdentifier, _ value: String?, _ label: String) async {
+            guard value != nil else { return }
+            if await stringValue(of: identifier, in: items) == nil {
+                issues.append("未保留原元数据：\(label)")
+            }
+        }
+        switch container {
+        case .mp4:
+            await missing(.iTunesMetadataSongName, expected.title, "标题")
+            await missing(.iTunesMetadataArtist, expected.artist, "作者")
+            await missing(.iTunesMetadataReleaseDate, expected.creationDate, "创建日期")
+            await missing(.iTunesMetadataDescription, expected.description, "简介")
+        case .mov:
+            await missing(.quickTimeMetadataTitle, expected.title, "标题")
+            await missing(.quickTimeMetadataArtist, expected.artist, "作者")
+            await missing(.quickTimeMetadataCreationDate, expected.creationDate, "创建日期")
+            await missing(.quickTimeMetadataDescription, expected.description, "简介")
+        }
+        return issues
+    }
+
     // MARK: - 工具
 
     private static func stringItem(_ identifier: AVMetadataIdentifier, _ value: String) -> AVMetadataItem {
