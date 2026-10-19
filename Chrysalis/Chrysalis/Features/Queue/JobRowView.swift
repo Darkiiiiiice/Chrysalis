@@ -37,6 +37,35 @@ struct JobRowView: View {
         .onTapGesture {
             store.selectedJobID = job.id
         }
+        .contextMenu {
+            if job.mediaKind == .movie, !job.metadataState.isConfirmed {
+                Button("确认元数据…") {
+                    store.confirmMovieContext = ConfirmMovieContext(id: job.id)
+                }
+                Divider()
+            }
+            if job.state.isRetryable {
+                Button("重试") {
+                    store.retryJob(job.id)
+                }
+            }
+            if job.state.isActive || job.state == .queued {
+                Button("取消任务") {
+                    store.cancelJob(job.id)
+                }
+            }
+            if job.state == .completed, let outputURL = job.outputURL {
+                Button("在 Finder 中显示") {
+                    store.revealInFinder(outputURL)
+                }
+            }
+            if job.state.isTerminal {
+                Divider()
+                Button("移除任务") {
+                    store.removeJob(job.id)
+                }
+            }
+        }
         .onHover { hovering in
             isHovered = hovering
         }
@@ -92,9 +121,22 @@ struct JobRowView: View {
         if job.state == .queued, job.mediaKind == .movie {
             switch job.metadataState {
             case .searching: return "电影 · 匹配元数据中…"
-            case .confirmed: return "电影 · \(job.metaLine)"
-            case .failed: return "电影 · 匹配失败，可手动填写"
-            case .needsReview, .none: return "电影 · 元数据待确认"
+            case .confirmed:
+                if let metadata = job.movieMetadata {
+                    let year = metadata.year.map { "（\($0)）" } ?? ""
+                    return "电影 · 已确认《\(metadata.title)》\(year)"
+                }
+                return "电影 · \(job.metaLine)"
+            case .failed:
+                if let summary = store.matchedSummary(jobID: job.id) {
+                    return "电影 · \(matchedLabel(summary))，确认后可转码"
+                }
+                return "电影 · 匹配失败，可手动填写"
+            case .needsReview, .none:
+                if let summary = store.matchedSummary(jobID: job.id) {
+                    return "电影 · \(matchedLabel(summary))"
+                }
+                return "电影 · 元数据待确认"
             }
         }
         switch job.state {
@@ -104,6 +146,11 @@ struct JobRowView: View {
         case .failed(let message): return "失败：\(message)"
         default: return job.metaLine
         }
+    }
+
+    private func matchedLabel(_ summary: TMDBMovieSummary) -> String {
+        let year = summary.year.map { "（\($0)）" } ?? ""
+        return "已匹配《\(summary.title)》\(year)（待确认）"
     }
 
     private var secondaryColor: Color {
@@ -133,6 +180,12 @@ struct JobRowView: View {
             if shouldShowCancel {
                 IconButton(systemImage: "xmark.circle", help: "取消任务") {
                     store.cancelJob(job.id)
+                }
+            }
+
+            if job.state.isTerminal {
+                IconButton(systemImage: "trash", help: "移除任务") {
+                    store.removeJob(job.id)
                 }
             }
 

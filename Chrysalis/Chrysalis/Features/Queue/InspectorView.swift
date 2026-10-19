@@ -110,6 +110,14 @@ struct InspectorView: View {
                     if let director = metadata.director, !director.isEmpty {
                         InspectorRow(label: "导演", value: director)
                     }
+                } else if let summary = store.matchedSummary(jobID: job.id) {
+                    // 待确认时直接展示匹配结果，不必点开确认窗口（走查反馈）
+                    let year = summary.year.map { "（\($0)）" } ?? ""
+                    InspectorRow(
+                        label: "匹配到",
+                        value: "《\(summary.title)》\(year)",
+                        valueColor: Theme.textPrimary
+                    )
                 }
                 if let failure = job.metadataState.failureMessage, job.movieMetadata == nil {
                     Text(failure)

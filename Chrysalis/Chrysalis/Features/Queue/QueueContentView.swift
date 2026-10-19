@@ -48,8 +48,8 @@ struct QueueContentView: View {
 
             Spacer()
 
-            TextButton(title: "清空已完成", isEnabled: store.completedCount > 0) {
-                store.clearCompleted()
+            TextButton(title: "清除已结束", isEnabled: store.finishedCount > 0) {
+                store.clearFinished()
             }
         }
         .padding(.horizontal, Theme.Size.contentInset)

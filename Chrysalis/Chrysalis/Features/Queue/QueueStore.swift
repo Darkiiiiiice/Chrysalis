@@ -50,6 +50,8 @@ final class QueueStore {
 
     /// 预设仓库（内置 + 自定义；设计文档 §6.6 / §9）。
     let presets = PresetStore()
+    /// 历史记录仓库（设计文档 §8.6 / §9；P5）。
+    let history = HistoryStore()
 
     var selectedJobID: UUID?
     var isInspectorPresented = false
@@ -283,8 +285,9 @@ final class QueueStore {
         jobs.filter { $0.state.isActive }.count
     }
 
-    var completedCount: Int {
-        jobs.filter { $0.state == .completed }.count
+    /// 已结束（完成/取消/失败/中断）任务数，供「清除已结束」按钮使用。
+    var finishedCount: Int {
+        jobs.filter { $0.state.isTerminal }.count
     }
 
     /// 批量进度（运行中任务的平均 fraction；无运行任务时为 nil）。
@@ -444,14 +447,14 @@ final class QueueStore {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         switch jobs[index].state {
         case .queued:
-            jobs[index].state = .cancelled
+            updateState(id: id, state: .cancelled)
         case .preparing, .running, .finishing:
             jobs[index].state = .cancelling
             engines[id]?.cancel()
+            saveQueue()
         default:
             return
         }
-        saveQueue()
     }
 
     /// 取消全部：停止批处理并取消当前任务；排队中的任务保留（再次「开始」继续）。
@@ -485,15 +488,87 @@ final class QueueStore {
         saveQueue()
     }
 
-    func clearCompleted() {
-        let completedIDs = jobs.filter { $0.state == .completed }.map(\.id)
-        guard !completedIDs.isEmpty else { return }
-        jobs.removeAll { $0.state == .completed }
-        for id in completedIDs {
+    /// 重新转码：把历史记录重新入队，保留预设与电影元数据快照（设计文档 §8.6；P5）。
+    func requeueHistory(_ entry: HistoryEntry) {
+        guard outputDirectory != nil else {
+            showBanner(kind: .warning, message: "请先选择输出文件夹，再重新转码。")
+            return
+        }
+
+        var job = TranscodeJob(
+            inputURL: URL(fileURLWithPath: entry.inputPath),
+            preset: entry.preset
+        )
+        job.inputBookmark = entry.inputBookmark
+        job.mediaKind = entry.mediaKind
+        job.movieMetadata = entry.movieMetadata
+        job.metadataState = entry.movieMetadata != nil
+            ? .confirmed
+            : (entry.mediaKind == .movie ? .needsReview : .none)
+
+        let fileExists = FileManager.default.fileExists(atPath: entry.inputPath)
+        if let bookmark = job.inputBookmark {
+            if let resolved = BookmarkStore.resolve(bookmark) {
+                job.inputURL = resolved.url
+                if resolved.isStale, let refreshed = BookmarkStore.makeBookmark(for: resolved.url) {
+                    job.inputBookmark = refreshed
+                }
+            } else if fileExists {
+                // 书签失效但文件还在原处：按路径重建书签（非沙盒来源）
+                job.inputBookmark = BookmarkStore.makeBookmark(for: job.inputURL)
+            }
+        }
+        guard fileExists else {
+            showBanner(kind: .error, message: "「\(entry.inputFileName)」的原文件已不存在或授权失效，无法重新转码。")
+            return
+        }
+
+        // 与队列中未结束任务去重（设计文档 §8.6 与添加文件行为一致）
+        let path = job.inputURL.path(percentEncoded: false)
+        if jobs.contains(where: { $0.inputURL.path(percentEncoded: false) == path && !$0.state.isTerminal }) {
+            showBanner(kind: .info, message: "「\(entry.inputFileName)」已在队列中。")
+            return
+        }
+
+        jobs.append(job)
+        inspect(jobID: job.id)
+        if job.mediaKind == .movie, !job.metadataState.isConfirmed {
+            startMatching(jobID: job.id)
+        }
+        saveQueue()
+        sidebarSelection = .queue
+        showBanner(kind: .info, message: "已从历史重新入队：「\(entry.inputFileName)」。")
+    }
+
+    /// 移除单个已结束任务（完成 / 取消 / 失败 / 中断；进行中需先取消）。
+    func removeJob(_ id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].state.isTerminal else { return }
+        jobs.remove(at: index)
+        thumbnails[id] = nil
+        movieCandidates[id] = nil
+        if selectedJobID == id {
+            selectedJobID = nil
+        }
+        if confirmMovieContext?.id == id {
+            confirmMovieContext = nil
+        }
+        saveQueue()
+    }
+
+    /// 移除所有已结束任务（完成 / 取消 / 失败 / 中断）。
+    func clearFinished() {
+        let removableIDs = jobs.filter { $0.state.isTerminal }.map(\.id)
+        guard !removableIDs.isEmpty else { return }
+        jobs.removeAll { $0.state.isTerminal }
+        for id in removableIDs {
             thumbnails[id] = nil
+            movieCandidates[id] = nil
         }
         if let selected = selectedJobID, !jobs.contains(where: { $0.id == selected }) {
             selectedJobID = nil
+        }
+        if let context = confirmMovieContext, !jobs.contains(where: { $0.id == context.id }) {
+            confirmMovieContext = nil
         }
         saveQueue()
     }
@@ -502,6 +577,14 @@ final class QueueStore {
 
     func toggleInspector() {
         isInspectorPresented.toggle()
+    }
+
+    /// 应用终止前：保存队列并清理输出目录残留临时文件（设计文档 §6.4；P5）。
+    func prepareForTermination() {
+        saveQueue()
+        if let outputDirectory {
+            OutputPlanner.cleanupOrphanTemps(in: outputDirectory)
+        }
     }
 
     func openInspector(for id: UUID) {
@@ -534,6 +617,11 @@ final class QueueStore {
     /// 未确认元数据的排队电影任务（设计文档 §7.5：拦截「开始全部」）。
     nonisolated static func unconfirmedMovieJobs(in jobs: [TranscodeJob]) -> [TranscodeJob] {
         jobs.filter { $0.state == .queued && $0.needsMetadataConfirmation }
+    }
+
+    /// 自动匹配的最高分候选摘要（队列行 / 检查器直接展示，不必点开确认窗口）。
+    func matchedSummary(jobID: UUID) -> TMDBMovieSummary? {
+        movieCandidates[jobID]?.first?.summary
     }
 
     /// 自动匹配：解析文件名 → TMDB 搜索 → 前 5 候选。
@@ -685,6 +773,9 @@ final class QueueStore {
     private func updateState(id: UUID, state: TranscodeJob.State) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[index].state = state
+        if state.isTerminal {
+            recordHistory(jobs[index])
+        }
         saveQueue()
     }
 
@@ -692,6 +783,7 @@ final class QueueStore {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[index].state = .failed(message)
         jobs[index].errorText = message
+        recordHistory(jobs[index])
         Log.engine.error("任务失败：\(message, privacy: .public)")
         showBanner(kind: .error, message: "\(jobs[index].displayName)：\(message)")
         saveQueue()
@@ -719,10 +811,31 @@ final class QueueStore {
             speed: outcome.averageSpeed,
             etaSeconds: 0
         )
+        recordHistory(jobs[index])
         Log.engine.info(
             "完成 \(outcome.outputURL.lastPathComponent, privacy: .public)：\(Fmt.speed(outcome.averageSpeed), privacy: .public)"
         )
         saveQueue()
+    }
+
+    /// 任务终态 → 历史记录 + 完成通知（设计文档 §8.6 / §9；P5）。
+    private func recordHistory(_ job: TranscodeJob) {
+        let kind: HistoryEntry.Kind
+        switch job.state {
+        case .completed: kind = .completed
+        case .cancelled: kind = .cancelled
+        case .interrupted: kind = .interrupted
+        case .failed: kind = .failed
+        default: return
+        }
+        history.record(HistoryEntry(job: job, kind: kind))
+        if AppSettings.notifyOnCompletion {
+            let fileName = job.displayName
+            let message = job.errorText
+            Task {
+                await CompletionNotifier.notify(fileName: fileName, kind: kind, message: message)
+            }
+        }
     }
 
     // MARK: - 队列恢复与持久化（设计文档 §9）

@@ -20,7 +20,9 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.s4) {
                     tmdbSection
                     proxySection
+                    notificationSection
                     hardwareSection
+                    diagnosticsSection
                 }
                 .padding(Theme.Size.contentInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -157,6 +159,90 @@ struct SettingsScreen: View {
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: 通知（设计文档 §8.6；P5）
+
+    @AppStorage(AppSettings.notifyOnCompletionKey)
+    private var notifyOnCompletion = true
+
+    @State private var notificationHint: String?
+
+    @ViewBuilder
+    private var notificationSection: some View {
+        InspectorSection(title: "通知") {
+            Toggle("转码完成 / 失败后发送系统通知", isOn: Binding(
+                get: { notifyOnCompletion },
+                set: { enabled in
+                    notifyOnCompletion = enabled
+                    notificationHint = nil
+                    guard enabled else { return }
+                    Task {
+                        let granted = await CompletionNotifier.requestAuthorizationIfNeeded()
+                        if !granted {
+                            notificationHint = "系统通知权限未开启：请在 系统设置 → 通知 → 蝉蜕 中允许。"
+                        }
+                    }
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(Theme.TextStyle.body)
+
+            if let notificationHint {
+                Text(notificationHint)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("只在应用后台或批量完成时打扰你；取消与中断不发送通知。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: 诊断（设计文档 §8.6；P5）
+
+    @ViewBuilder
+    private var diagnosticsSection: some View {
+        InspectorSection(title: "诊断") {
+            LabeledContent {
+                Text(Self.versionText)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+            } label: {
+                Text("版本")
+                    .font(Theme.TextStyle.body)
+                    .foregroundStyle(Theme.textPrimary)
+            }
+
+            HStack(spacing: Theme.Spacing.s2) {
+                TextButton(title: "打开数据文件夹") {
+                    NSWorkspace.shared.open(AppPaths.supportDirectory)
+                }
+                TextButton(title: "打开通知设置") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+
+            Text("数据文件夹内含队列、历史与预设；日志走系统统一日志（Console 中筛选进程「Chrysalis」）。凭据存于钥匙串，不写入任何文件。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static var versionText: String {
+        let bundle = Bundle.main
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "\(version) (\(build))"
     }
 
     private func testProxyConnection() {

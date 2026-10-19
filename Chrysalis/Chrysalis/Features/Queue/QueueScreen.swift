@@ -63,7 +63,7 @@ struct QueueScreen: View {
         case .presets:
             PresetsScreen()
         case .history:
-            PlaceholderScreen(title: "历史", subtitle: "历史记录将在 P5 提供")
+            HistoryScreen()
         case .settings:
             SettingsScreen()
         }

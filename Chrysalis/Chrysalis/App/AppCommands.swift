@@ -37,10 +37,10 @@ struct AppCommands: Commands {
             .keyboardShortcut(".", modifiers: .command)
             .disabled(!store.isRunningBatch)
 
-            Button("清理已完成") {
-                store.clearCompleted()
+            Button("清理已结束") {
+                store.clearFinished()
             }
-            .disabled(store.completedCount == 0)
+            .disabled(store.finishedCount == 0)
 
             Divider()
 

@@ -33,6 +33,8 @@ struct ConfirmMovieSheet: View {
     /// 表单快照基线（判断「已手动修改」；程序化填充时刷新）。
     @State private var baseline = ""
     @State private var didLoad = false
+    /// 自动匹配候选是否已尝试预填表单（走查反馈：打开确认窗口即可看到匹配结果）。
+    @State private var didAutoFill = false
 
     private var job: TranscodeJob? {
         store.jobs.first { $0.id == jobID }
@@ -58,6 +60,9 @@ struct ConfirmMovieSheet: View {
         .frame(width: 720)
         .background(Theme.bg)
         .onAppear(perform: loadOnce)
+        .onChange(of: candidates) {
+            autoFillTopCandidateIfNeeded()
+        }
         .confirmationDialog(
             "用此候选覆盖当前内容？",
             isPresented: Binding(
@@ -359,6 +364,16 @@ struct ConfirmMovieSheet: View {
             baseline = metadata.source == .manual ? "" : snapshot
         }
         searchMessage = job.metadataState.failureMessage
+        autoFillTopCandidateIfNeeded()
+    }
+
+    /// 待确认且表单为空时，预填自动匹配的最高分候选详情；
+    /// 仅填充表单（仍需人工点「确认并用于转码」），不会静默写入。
+    private func autoFillTopCandidateIfNeeded() {
+        guard !didAutoFill, let job, job.movieMetadata == nil, title.isEmpty,
+              let top = candidates.first else { return }
+        didAutoFill = true
+        Task { await apply(top, skipIfEdited: true) }
     }
 
     private func search() {
@@ -384,11 +399,13 @@ struct ConfirmMovieSheet: View {
         }
     }
 
-    private func apply(_ candidate: MovieCandidate) async {
+    private func apply(_ candidate: MovieCandidate, skipIfEdited: Bool = false) async {
         loadingDetailID = candidate.id
         searchMessage = nil
         let result = await store.movieDetail(id: candidate.id)
         loadingDetailID = nil
+        // 详情请求期间用户已手动编辑时，不覆盖（预填场景）
+        if skipIfEdited && isEdited { return }
         switch result {
         case .success(let metadata):
             fill(metadata)

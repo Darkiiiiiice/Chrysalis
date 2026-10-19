@@ -15,6 +15,7 @@ enum AppPaths {
 
     static var presetsFileURL: URL { supportDirectory.appendingPathComponent("presets.json") }
     static var queueFileURL: URL { supportDirectory.appendingPathComponent("queue.json") }
+    static var historyFileURL: URL { supportDirectory.appendingPathComponent("history.json") }
 
     /// TMDB 元数据缓存目录（搜索/详情/海报，7 天；设计文档 §7.5）。
     static var metadataCacheDirectory: URL {
