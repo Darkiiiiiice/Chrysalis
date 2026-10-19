@@ -35,6 +35,15 @@ final class QueueStore {
     /// 添加 Sheet 待入队的文件（设计文档 §8.6 添加文件）。
     private(set) var pendingAddURLs: [URL] = []
 
+    /// 电影元数据服务（TMDB；设计文档 §7.5）。
+    let metadataService = MovieMetadataService()
+    /// 匹配候选（仅内存，不持久化）。
+    private(set) var movieCandidates: [UUID: [MovieCandidate]] = [:]
+    /// 元数据确认 Sheet 的呈现上下文。
+    var confirmMovieContext: ConfirmMovieContext?
+    /// TMDB 凭据是否已配置（设置页与确认 Sheet 展示）。
+    private(set) var isTMDBConfigured = false
+
     /// 预设仓库（内置 + 自定义；设计文档 §6.6 / §9）。
     let presets = PresetStore()
 
@@ -69,6 +78,10 @@ final class QueueStore {
             capabilities = probe
             Log.app.info("硬件能力：\(probe.summaryText, privacy: .public)")
         }
+        // 载入 TMDB 凭据（设计文档 §7.5：Keychain；不写日志）
+        let storedCredential = KeychainStore.readTMDB()
+        isTMDBConfigured = storedCredential != nil
+        await metadataService.setCredential(storedCredential.map(TMDBCredential.detect))
         restoreQueue()
     }
 
@@ -108,11 +121,11 @@ final class QueueStore {
         isAddSheetPresented = true
     }
 
-    /// 添加 Sheet 确认：按所选预设入队并异步预检。
-    func confirmAdd(presetID: String) {
+    /// 添加 Sheet 确认：按所选预设入队并异步预检；「这些是电影」时启动元数据匹配。
+    func confirmAdd(presetID: String, markAsMovies: Bool) {
         let preset = presets.preset(id: presetID) ?? presets.selectedPreset
         presets.select(id: preset.id)
-        enqueue(pendingAddURLs, preset: preset)
+        enqueue(pendingAddURLs, preset: preset, markAsMovies: markAsMovies)
         pendingAddURLs = []
     }
 
@@ -120,14 +133,28 @@ final class QueueStore {
         pendingAddURLs = []
     }
 
-    private func enqueue(_ urls: [URL], preset: TranscodePreset) {
+    private func enqueue(_ urls: [URL], preset: TranscodePreset, markAsMovies: Bool = false) {
+        var addedIDs: [UUID] = []
         for url in urls {
             var job = TranscodeJob(inputURL: url, preset: preset)
             job.inputBookmark = BookmarkStore.makeBookmark(for: url)
+            if markAsMovies {
+                job.mediaKind = .movie
+            }
             jobs.append(job)
+            addedIDs.append(job.id)
             inspect(jobID: job.id)
         }
         saveQueue()
+
+        if markAsMovies {
+            for id in addedIDs {
+                startMatching(jobID: id)
+            }
+            if isRunningBatch {
+                showBanner(kind: .warning, message: "电影任务需确认元数据后才能开始；其余任务不受影响。")
+            }
+        }
     }
 
     private func inspect(jobID: UUID) {
@@ -275,6 +302,19 @@ final class QueueStore {
             isChooseOutputPresented = true
             return
         }
+
+        // 未确认的电影任务拦截「开始全部」，并跳到第一个待确认任务（设计文档 §7.5）
+        let unconfirmed = Self.unconfirmedMovieJobs(in: jobs)
+        if let first = unconfirmed.first {
+            showBanner(
+                kind: .warning,
+                message: "还有 \(unconfirmed.count) 个电影任务未确认元数据：确认后再开始。"
+            )
+            openInspector(for: first.id)
+            confirmMovieContext = ConfirmMovieContext(id: first.id)
+            return
+        }
+
         guard jobs.contains(where: { $0.state == .queued }) else { return }
 
         isStopRequested = false
@@ -291,7 +331,10 @@ final class QueueStore {
             runnerTask = nil
         }
         while !isStopRequested {
-            guard let next = jobs.first(where: { $0.state == .queued && $0.mediaInfo != nil }) else { break }
+            // 未确认元数据的电影任务在队列中等待确认，不参与本轮批量（设计文档 §7.5）
+            guard let next = jobs.first(where: {
+                $0.state == .queued && $0.mediaInfo != nil && !$0.needsMetadataConfirmation
+            }) else { break }
             await runJob(id: next.id)
         }
     }
@@ -323,6 +366,12 @@ final class QueueStore {
             jobs[index].outputURL = outputURL
         }
 
+        // 电影元数据与海报（设计文档 §7.5）：海报只读本地缓存，失败不阻塞
+        var posterData: Data?
+        if let posterPath = job.movieMetadata?.posterPath {
+            posterData = await metadataService.posterData(path: posterPath)
+        }
+
         let request = TranscodeRequest(
             inputURL: job.inputURL,
             outputURL: outputURL,
@@ -335,7 +384,9 @@ final class QueueStore {
             audioMaxChannels: job.preset.audio.maxChannels,
             audioSampleRate: job.preset.audio.sampleRateOverride,
             requireHardware: true,
-            encoderID: encoder.encoderID
+            encoderID: encoder.encoderID,
+            metadata: job.movieMetadata,
+            posterData: posterData
         )
 
         let engine = TranscodeEngine()
@@ -401,6 +452,11 @@ final class QueueStore {
         if jobs[index].mediaInfo == nil {
             inspect(jobID: id)
         }
+        // 电影任务重试时刷新候选（未确认且不在匹配中）
+        if jobs[index].mediaKind == .movie, !jobs[index].metadataState.isConfirmed,
+           jobs[index].metadataState != .searching {
+            startMatching(jobID: id)
+        }
         saveQueue()
     }
 
@@ -426,6 +482,158 @@ final class QueueStore {
     func openInspector(for id: UUID) {
         selectedJobID = id
         isInspectorPresented = true
+    }
+
+    // MARK: - 电影元数据（设计文档 §7.5）
+
+    /// 单任务「电影」开关。
+    func setMovie(_ enabled: Bool, jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        if enabled {
+            guard jobs[index].mediaKind != .movie else { return }
+            jobs[index].mediaKind = .movie
+            saveQueue()
+            startMatching(jobID: jobID)
+        } else {
+            jobs[index].mediaKind = .video
+            jobs[index].metadataState = .none
+            jobs[index].movieMetadata = nil
+            movieCandidates[jobID] = nil
+            if confirmMovieContext?.id == jobID {
+                confirmMovieContext = nil
+            }
+            saveQueue()
+        }
+    }
+
+    /// 未确认元数据的排队电影任务（设计文档 §7.5：拦截「开始全部」）。
+    nonisolated static func unconfirmedMovieJobs(in jobs: [TranscodeJob]) -> [TranscodeJob] {
+        jobs.filter { $0.state == .queued && $0.needsMetadataConfirmation }
+    }
+
+    /// 自动匹配：解析文件名 → TMDB 搜索 → 前 5 候选。
+    /// 匹配结果永不静默写入；无论置信度多高都要人工确认（设计文档 §7.5）。
+    private func startMatching(jobID: UUID) {
+        guard let job = jobs.first(where: { $0.id == jobID }), job.mediaKind == .movie else { return }
+        guard job.metadataState != .searching else { return }
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].metadataState = .searching
+        saveQueue()
+
+        let filename = job.displayName
+        Task { [weak self] in
+            guard let self else { return }
+            guard await self.metadataService.isConfigured else {
+                self.showBanner(
+                    kind: .warning,
+                    message: "电影任务需要 TMDB API Key 才能自动匹配：可在设置中填写，或手动填写元数据。"
+                )
+                self.applyMatchFailure(
+                    jobID: jobID,
+                    message: "未配置 TMDB API Key：可在设置中填写，或手动填写元数据。"
+                )
+                return
+            }
+            do {
+                let result = try await self.metadataService.match(filename: filename)
+                self.movieCandidates[jobID] = result.candidates
+                guard let index = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                self.jobs[index].metadataState = .needsReview
+                self.saveQueue()
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                self.applyMatchFailure(jobID: jobID, message: message)
+            }
+        }
+    }
+
+    private func applyMatchFailure(jobID: UUID, message: String) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].metadataState = .failed(message)
+        Log.tmdb.info("元数据匹配失败：\(message, privacy: .public)")
+        saveQueue()
+    }
+
+    /// 手动搜索（确认 Sheet 用）；返回错误文案（nil 表示成功，候选已更新）。
+    func searchMovieCandidates(jobID: UUID, query: String, year: Int?) async -> String? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "请输入搜索关键词。" }
+        do {
+            let results = try await metadataService.search(query: trimmed, year: year)
+            movieCandidates[jobID] = MovieMatcher.rank(
+                results,
+                parsed: ParsedTitle(primaryTitle: trimmed, alternativeTitle: nil, year: year)
+            )
+            if results.isEmpty {
+                return "没有找到结果：换个关键词试试，或直接手动填写。"
+            }
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 候选详情（确认 Sheet 用）。
+    func movieDetail(id: Int) async -> Result<MovieMetadata, MetadataError> {
+        do {
+            return .success(try await metadataService.detail(id: id).movieMetadata)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return .failure(MetadataError(message: message))
+        }
+    }
+
+    /// 确认并提交元数据（此时才允许开始转码）。
+    func commitMovieMetadata(jobID: UUID, metadata: MovieMetadata) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].movieMetadata = metadata
+        jobs[index].metadataState = .confirmed
+        Log.tmdb.info("电影元数据已确认（source=\(metadata.source.rawValue, privacy: .public)）")
+        saveQueue()
+    }
+
+    /// 清除已填元数据（回到待确认）。
+    func clearMovieMetadata(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].movieMetadata = nil
+        jobs[index].metadataState = .needsReview
+        saveQueue()
+    }
+
+    /// 重新匹配（失败后重试）。
+    func retryMatch(jobID: UUID) {
+        startMatching(jobID: jobID)
+    }
+
+    // MARK: - TMDB 设置（设计文档 §7.5）
+
+    /// 验证并保存 TMDB 凭据；返回错误文案（nil 表示成功）。
+    func validateAndSaveTMDB(_ raw: String) async -> String? {
+        let credential = TMDBCredential.detect(raw)
+        guard !credential.value.isEmpty else { return "请输入 API Key 或 Read Access Token。" }
+        do {
+            try await metadataService.validate(credential)
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        guard KeychainStore.saveTMDB(credential.value) else {
+            return "无法写入系统钥匙串。"
+        }
+        await metadataService.setCredential(credential)
+        isTMDBConfigured = true
+        return nil
+    }
+
+    /// 移除已保存的 TMDB 凭据。
+    func removeTMDB() {
+        KeychainStore.deleteTMDB()
+        isTMDBConfigured = false
+        Task { await metadataService.setCredential(nil) }
+    }
+
+    /// 清除 TMDB 元数据缓存（搜索/详情/海报）。
+    func clearMetadataCache() {
+        Task { await metadataService.clearCache() }
     }
 
     // MARK: - 状态更新（MainActor）
@@ -496,6 +704,10 @@ final class QueueStore {
             job.errorText = persisted.errorText
             job.verificationIssues = persisted.verificationIssues
             job.notes = persisted.notes
+            job.mediaKind = persisted.mediaKind ?? .video
+            job.metadataState = persisted.metadataState
+                ?? (job.mediaKind == .movie ? .needsReview : .none)
+            job.movieMetadata = persisted.movieMetadata
             job.state = persisted.state.restoredState
             if job.state == .interrupted {
                 interruptedCount += 1
@@ -541,6 +753,12 @@ final class QueueStore {
             inspect(jobID: job.id)
         }
 
+        // 电影任务的候选不持久化：恢复后对未确认的排队任务重新匹配（设计文档 §7.5）
+        for job in jobs where job.mediaKind == .movie
+            && job.state == .queued && !job.metadataState.isConfirmed {
+            startMatching(jobID: job.id)
+        }
+
         if interruptedCount > 0 {
             showBanner(kind: .info, message: "已恢复队列：\(interruptedCount) 个任务因上次退出被中断，可重试。")
         } else if accessLostCount > 0 {
@@ -580,4 +798,9 @@ final class QueueStore {
         bannerDismissTask = nil
         banner = nil
     }
+}
+
+/// 元数据确认 Sheet 的呈现上下文（item-based sheet）。
+struct ConfirmMovieContext: Identifiable, Equatable {
+    var id: UUID
 }

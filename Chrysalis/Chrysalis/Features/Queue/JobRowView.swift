@@ -89,18 +89,29 @@ struct JobRowView: View {
     }
 
     private var secondaryLine: String {
+        if job.state == .queued, job.mediaKind == .movie {
+            switch job.metadataState {
+            case .searching: return "电影 · 匹配元数据中…"
+            case .confirmed: return "电影 · \(job.metaLine)"
+            case .failed: return "电影 · 匹配失败，可手动填写"
+            case .needsReview, .none: return "电影 · 元数据待确认"
+            }
+        }
         switch job.state {
-        case .preparing: "准备中…"
-        case .cancelling: "取消中…"
-        case .interrupted: "已中断（可重试）"
-        case .failed(let message): "失败：\(message)"
-        default: job.metaLine
+        case .preparing: return "准备中…"
+        case .cancelling: return "取消中…"
+        case .interrupted: return "已中断（可重试）"
+        case .failed(let message): return "失败：\(message)"
+        default: return job.metaLine
         }
     }
 
     private var secondaryColor: Color {
         if case .failed = job.state { return Theme.error }
         if job.state == .interrupted { return Theme.warning }
+        if job.state == .queued, job.mediaKind == .movie, !job.metadataState.isConfirmed {
+            return Theme.warning
+        }
         return Theme.textSecondary
     }
 

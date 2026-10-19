@@ -302,6 +302,18 @@ actor TranscodeEngine {
         let videoReceiver = writer.inputReceiver(for: videoInput)
         let audioReceiver = audioInput.map { writer.inputReceiver(for: $0) }
 
+        // 电影元数据（设计文档 §7.5）：必须在 start() 之前设置
+        if let metadata = request.metadata {
+            writer.metadata = MetadataWriter.items(
+                container: request.container,
+                metadata: metadata,
+                posterData: request.posterData
+            )
+            if metadata.posterPath != nil, request.posterData == nil {
+                notes.append("海报未获取，已跳过")
+            }
+        }
+
         // 启动（RequireHardware 标志在此被接受或拒绝，设计文档 §7）
         do {
             try writer.start()
@@ -459,12 +471,20 @@ actor TranscodeEngine {
 
         let wallSeconds = Date.now.timeIntervalSince(started)
         let size = (((try? fm.attributesOfItem(atPath: finalURL.path))?[.size]) as? Int64) ?? 0
-        let verificationIssues = await verifyOutput(
+        var verificationIssues = await verifyOutput(
             url: finalURL,
             expectedDuration: durationSeconds,
             expectedCodec: request.videoCodec,
             expectedSize: renderSize
         )
+        if let metadata = request.metadata {
+            verificationIssues += await MetadataWriter.verificationIssues(
+                url: finalURL,
+                container: request.container,
+                metadata: metadata,
+                expectsArtwork: request.posterData != nil
+            )
+        }
 
         return TranscodeOutcome(
             outputURL: finalURL,

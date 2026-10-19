@@ -52,6 +52,12 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var verificationIssues: [String]
     /// 处理过程提示（引擎 notes，检查器展示）。
     var notes: [String]
+    /// 任务类型（设计文档 §7.5）：电影任务转码前必须人工确认元数据。
+    var mediaKind: MediaKind = .video
+    /// 电影元数据状态（none → searching → needsReview → confirmed / failed）。
+    var metadataState: MovieMetadataState = .none
+    /// 已确认的电影元数据快照（转码时写入容器）。
+    var movieMetadata: MovieMetadata?
 
     init(id: UUID = UUID(), inputURL: URL, preset: TranscodePreset = .defaultPreset) {
         self.id = id
@@ -68,5 +74,10 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var metaLine: String {
         guard let mediaInfo, let video = mediaInfo.video else { return "读取中…" }
         return "\(mediaInfo.dimensionsLabel) · \(video.codecName) · \(mediaInfo.durationLabel)"
+    }
+
+    /// 电影任务是否需要先确认元数据（转码前置校验，设计文档 §7.5）。
+    var needsMetadataConfirmation: Bool {
+        mediaKind == .movie && !metadataState.isConfirmed
     }
 }

@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// 轻量添加 Sheet（设计文档 §8.6）：文件列表 + 预设选择。
-/// 「这些是电影」总开关随 P3 加入。
+/// 轻量添加 Sheet（设计文档 §8.6）：文件列表 + 预设选择 + 「这些是电影」总开关。
 struct AddFilesSheet: View {
     @Environment(QueueStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     @State private var presetID = ""
+    @State private var markAsMovies = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -92,6 +92,12 @@ struct AddFilesSheet: View {
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
 
+            Toggle("这些是电影（转码前需确认元数据）", isOn: $markAsMovies)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(Theme.TextStyle.body)
+                .foregroundStyle(Theme.textPrimary)
+
             HStack {
                 Spacer()
                 TextButton(title: "取消") {
@@ -99,7 +105,7 @@ struct AddFilesSheet: View {
                     dismiss()
                 }
                 PrimaryButton(title: "添加 \(store.pendingAddURLs.count) 个文件") {
-                    store.confirmAdd(presetID: presetID)
+                    store.confirmAdd(presetID: presetID, markAsMovies: markAsMovies)
                     dismiss()
                 }
             }

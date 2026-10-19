@@ -4,7 +4,7 @@ import os
 /// 活动队列持久化（设计文档 §9）：存 `Application Support/Chrysalis/queue.json`；
 /// 启动时恢复，运行中（活跃）任务恢复为 `interrupted`，由用户重试。
 struct QueueArchive: Codable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     var version: Int
     var outputDirectoryBookmark: Data?
@@ -61,6 +61,10 @@ struct QueueArchive: Codable {
         var verificationIssues: [String]
         var notes: [String]
         var mediaInfo: MediaInfo?
+        /// 电影标记与元数据快照（设计文档 §7.5；v1 队列文件没有这些字段，缺省即普通任务）。
+        var mediaKind: MediaKind?
+        var metadataState: MovieMetadataState?
+        var movieMetadata: MovieMetadata?
 
         init(_ job: TranscodeJob) {
             self.id = job.id
@@ -74,6 +78,9 @@ struct QueueArchive: Codable {
             self.verificationIssues = job.verificationIssues
             self.notes = job.notes
             self.mediaInfo = job.mediaInfo
+            self.mediaKind = job.mediaKind
+            self.metadataState = job.metadataState
+            self.movieMetadata = job.movieMetadata
         }
     }
 

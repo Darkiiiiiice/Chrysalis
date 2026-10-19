@@ -48,6 +48,9 @@ struct QueueScreen: View {
         .sheet(isPresented: $store.isAddSheetPresented) {
             AddFilesSheet()
         }
+        .sheet(item: $store.confirmMovieContext) { context in
+            ConfirmMovieSheet(jobID: context.id)
+        }
         .navigationTitle("Chrysalis")
         .background(Theme.bg)
     }

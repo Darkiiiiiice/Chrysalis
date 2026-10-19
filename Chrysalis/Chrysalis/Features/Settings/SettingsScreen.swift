@@ -1,8 +1,12 @@
 import SwiftUI
 
-/// 设置页（设计文档 §8.6）：P2 先提供「硬件」分组（能力矩阵只读）。
+/// 设置页（设计文档 §8.6）：TMDB 凭据与元数据缓存 + 「硬件」分组（能力矩阵只读）。
 struct SettingsScreen: View {
     @Environment(QueueStore.self) private var store
+
+    @State private var credentialInput = ""
+    @State private var validationMessage: String?
+    @State private var isSavingCredential = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -11,6 +15,7 @@ struct SettingsScreen: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.s4) {
+                    tmdbSection
                     hardwareSection
                 }
                 .padding(Theme.Size.contentInset)
@@ -25,7 +30,7 @@ struct SettingsScreen: View {
             Text("设置")
                 .font(Theme.TextStyle.section)
                 .foregroundStyle(Theme.textPrimary)
-            Text("硬件能力（只读）")
+            Text("电影元数据与硬件能力")
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
             Spacer()
@@ -33,6 +38,73 @@ struct SettingsScreen: View {
         .padding(.horizontal, Theme.Size.contentInset)
         .frame(height: 44)
         .background(Theme.bg)
+    }
+
+    // MARK: TMDB（设计文档 §7.5）
+
+    @ViewBuilder
+    private var tmdbSection: some View {
+        InspectorSection(title: "TMDB 电影元数据") {
+            HStack(spacing: Theme.Spacing.s1) {
+                StatusDot(color: store.isTMDBConfigured ? Theme.success : Theme.textSecondary)
+                Text(store.isTMDBConfigured ? "已配置（凭据存于系统钥匙串）" : "未配置（电影任务只能手动填写元数据）")
+                    .font(Theme.TextStyle.body)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer(minLength: 0)
+            }
+
+            SecureField("API Key（v3）或 Read Access Token（v4）", text: $credentialInput)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 360)
+
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: Theme.Spacing.s2) {
+                PrimaryButton(title: "验证并保存", isEnabled: !isSavingCredential) {
+                    saveCredential()
+                }
+                if store.isTMDBConfigured {
+                    TextButton(title: "移除已保存凭据") {
+                        store.removeTMDB()
+                        validationMessage = nil
+                    }
+                }
+                TextButton(title: "清除元数据缓存") {
+                    store.clearMetadataCache()
+                }
+            }
+
+            Text("凭据只写入系统钥匙串，不写日志；仅勾选「电影」的任务联网（TMDB）。搜索、详情与海报数据本地缓存 7 天。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func saveCredential() {
+        guard !isSavingCredential else { return }
+        isSavingCredential = true
+        validationMessage = nil
+        let input = credentialInput
+        Task {
+            let error = await store.validateAndSaveTMDB(input)
+            isSavingCredential = false
+            if let error {
+                validationMessage = error
+            } else {
+                credentialInput = ""
+            }
+        }
     }
 
     @ViewBuilder

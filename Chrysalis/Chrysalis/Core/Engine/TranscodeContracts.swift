@@ -17,6 +17,10 @@ struct TranscodeRequest: Sendable {
     var requireHardware: Bool
     /// 指定硬件编码器 ID；nil 表示由系统选择（仍带 Require 标志）。
     var encoderID: String?
+    /// 已确认的电影元数据（设计文档 §7.5）；nil 表示不写电影元数据。
+    var metadata: MovieMetadata?
+    /// 海报数据（本地缓存取得；nil 表示跳过海报，不阻塞转码）。
+    var posterData: Data?
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。

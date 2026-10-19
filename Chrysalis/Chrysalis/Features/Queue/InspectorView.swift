@@ -15,6 +15,7 @@ struct InspectorView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Spacing.s4) {
                         inputSection(job)
+                        metadataSection(job)
                         outputSection(job)
                         hardwareSection(job)
                         errorSection(job)
@@ -81,6 +82,81 @@ struct InspectorView: View {
             } else {
                 InspectorRow(label: "状态", value: "读取中…")
             }
+        }
+    }
+
+    // MARK: 电影元数据（设计文档 §7.5）
+
+    @ViewBuilder
+    private func metadataSection(_ job: TranscodeJob) -> some View {
+        InspectorSection(title: "电影元数据") {
+            Toggle("标记为电影（转码前需确认）", isOn: movieBinding(job))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(Theme.TextStyle.body)
+                .foregroundStyle(Theme.textPrimary)
+
+            if job.mediaKind == .movie {
+                InspectorRow(
+                    label: "状态",
+                    value: metadataStatusText(job),
+                    valueColor: metadataStatusColor(job)
+                )
+                if let metadata = job.movieMetadata {
+                    InspectorRow(label: "标题", value: metadata.title)
+                    if let year = metadata.year {
+                        InspectorRow(label: "年份", value: String(year))
+                    }
+                    if let director = metadata.director, !director.isEmpty {
+                        InspectorRow(label: "导演", value: director)
+                    }
+                }
+                if let failure = job.metadataState.failureMessage, job.movieMetadata == nil {
+                    Text(failure)
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.warning)
+                        .textSelection(.enabled)
+                }
+                HStack(spacing: Theme.Spacing.s2) {
+                    TextButton(
+                        title: job.movieMetadata == nil ? "确认元数据…" : "查看 / 修改…",
+                        tint: Theme.accent
+                    ) {
+                        store.confirmMovieContext = ConfirmMovieContext(id: job.id)
+                    }
+                    if job.metadataState.failureMessage != nil {
+                        TextButton(title: "重试匹配", tint: Theme.accent) {
+                            store.retryMatch(jobID: job.id)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func movieBinding(_ job: TranscodeJob) -> Binding<Bool> {
+        Binding(
+            get: { job.mediaKind == .movie },
+            set: { store.setMovie($0, jobID: job.id) }
+        )
+    }
+
+    private func metadataStatusText(_ job: TranscodeJob) -> String {
+        switch job.metadataState {
+        case .none: "未开始"
+        case .searching: "匹配中…"
+        case .needsReview: "待确认"
+        case .confirmed: "已确认"
+        case .failed: "匹配失败"
+        }
+    }
+
+    private func metadataStatusColor(_ job: TranscodeJob) -> Color {
+        switch job.metadataState {
+        case .confirmed: Theme.success
+        case .failed: Theme.warning
+        case .searching, .needsReview: Theme.textPrimary
+        case .none: Theme.textSecondary
         }
     }
 
