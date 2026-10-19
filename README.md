@@ -1,5 +1,7 @@
 # 蝉蜕（Chrysalis）
 
+**简体中文 | [English](README.en.md)**
+
 macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HEVC / ProRes，默认走 Apple 硬件媒体引擎（VideoToolbox），速度优先、CPU 占用低；可选从 TMDB 获取电影元数据，人工确认后写入 MP4/MOV 容器。纯 Swift + SwiftUI，零第三方依赖。
 
 > 「蝉蜕」取意「金蝉脱壳」——转码即蜕变：旧壳（容器）留在身后，影像本体无损，飞向新形。英文名「Chrysalis」是蛹壳——蜕变发生的静默容器；原文件保留、输出原子落盘，正合其意。
