@@ -38,6 +38,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var outputBytes: Int64?
     var errorText: String?
     var verificationIssues: [String]
+    /// 处理过程提示（引擎 notes，检查器展示）。
+    var notes: [String]
 
     init(inputURL: URL, preset: TranscodePreset = .defaultPreset) {
         self.id = UUID()
@@ -45,6 +47,7 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
         self.preset = preset
         self.state = .queued
         self.verificationIssues = []
+        self.notes = []
     }
 
     var displayName: String { inputURL.lastPathComponent }

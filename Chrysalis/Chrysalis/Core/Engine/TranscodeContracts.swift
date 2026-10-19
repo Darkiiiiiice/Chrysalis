@@ -36,6 +36,8 @@ struct TranscodeOutcome: Sendable {
     var averageSpeed: Double
     var usedComposition: Bool
     var verificationIssues: [String]
+    /// 处理过程提示（如多声道下混、旋转慢路径），展示在检查器「输出」区。
+    var notes: [String]
 }
 
 /// 引擎错误（人话描述；覆盖设计文档 §6.1 预检与 §7 硬件要求）。

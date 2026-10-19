@@ -398,6 +398,7 @@ final class QueueStore {
         jobs[index].outputURL = outcome.outputURL
         jobs[index].outputBytes = outcome.bytes
         jobs[index].verificationIssues = outcome.verificationIssues
+        jobs[index].notes = outcome.notes
         jobs[index].progress = TranscodeProgress(
             fraction: 1,
             processedSeconds: outcome.durationSeconds,

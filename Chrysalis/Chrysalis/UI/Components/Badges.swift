@@ -113,6 +113,9 @@ struct InlineBanner: View {
         }
         .padding(.trailing, Theme.Spacing.s1)
         .frame(minHeight: 36)
+        // 纵向取内容自身高度：左侧 2px 竖线是可伸缩 Shape，
+        // 不加 fixedSize 会把横幅撑满整个窗口（P1 验收发现的布局问题）
+        .fixedSize(horizontal: false, vertical: true)
         .background(Theme.surface)
         .accessibilityElement(children: .combine)
     }

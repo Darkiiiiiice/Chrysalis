@@ -128,16 +128,29 @@ actor TranscodeEngine {
         try checkDiskSpace(directory: outputDirectory, requiredBytes: estimatedBytes)
 
         let asset = AVURLAsset(url: request.inputURL)
-        let duration = try await asset.load(.duration)
-        let tracks = try await asset.load(.tracks)
+        let duration: CMTime
+        let tracks: [AVAssetTrack]
+        do {
+            duration = try await asset.load(.duration)
+            tracks = try await asset.load(.tracks)
+        } catch {
+            throw TranscodeEngineError.readerSetupFailed("读取媒体失败：\(errorText(error))")
+        }
         guard let videoTrack = tracks.first(where: { $0.mediaType == .video }) else {
             throw TranscodeEngineError.noVideoTrack
         }
         let audioTrack = tracks.first(where: { $0.mediaType == .audio })
 
-        let naturalSize = try await videoTrack.load(.naturalSize)
-        let preferredTransform = try await videoTrack.load(.preferredTransform)
-        let nominalFPS = Double(try await videoTrack.load(.nominalFrameRate))
+        let naturalSize: CGSize
+        let preferredTransform: CGAffineTransform
+        let nominalFPS: Double
+        do {
+            naturalSize = try await videoTrack.load(.naturalSize)
+            preferredTransform = try await videoTrack.load(.preferredTransform)
+            nominalFPS = Double(try await videoTrack.load(.nominalFrameRate))
+        } catch {
+            throw TranscodeEngineError.readerSetupFailed("读取视频轨失败：\(errorText(error))")
+        }
         let mediaFPS = nominalFPS > 0 ? nominalFPS : 30
 
         // 保持源分辨率与帧率；仅旋转（preferredTransform 非单位阵）走合成慢路径。
@@ -204,22 +217,44 @@ actor TranscodeEngine {
             throw TranscodeEngineError.readerSetupFailed("无法添加视频输出")
         }
 
-        // 音频：解码为 LPCM，稍后统一编码 AAC（设计文档 §6.3）
+        // 音频目标格式（设计文档 §6.3）：解码端直接输出「目标采样率 + 目标声道」的 LPCM，
+        // 保证读写两端格式严格一致。AAC 编码器对不同采样率有各自的合法码率上限
+        // （实测 22.05 kHz 立体声上限 128 kbps），非 44.1/48 kHz 的源统一规整到 48 kHz，
+        // 这样在任意预设码率下都合法；多声道源在解码端下混并给出提示。
         var audioOutput: AVAssetReaderTrackOutput?
-        var sourceAudioChannels = 0
-        var sourceAudioSampleRate: Double = 0
+        var audioTarget: (rate: Double, channels: Int)?
         if let audioTrack {
+            var sourceChannels = 0
+            var sourceRate: Double = 0
             if let format = (try? await audioTrack.load(.formatDescriptions))?.first,
                let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format) {
-                sourceAudioChannels = Int(asbd.pointee.mChannelsPerFrame)
-                sourceAudioSampleRate = asbd.pointee.mSampleRate
+                sourceChannels = Int(asbd.pointee.mChannelsPerFrame)
+                sourceRate = asbd.pointee.mSampleRate
             }
+
+            let channels = min(
+                max(sourceChannels > 0 ? sourceChannels : 2, 1),
+                max(request.audioMaxChannels, 1)
+            )
+            if sourceChannels > channels {
+                notes.append("多声道音轨（\(sourceChannels) 声道）：v1 下混为 \(channels) 声道")
+            }
+
+            var rate = request.audioSampleRate ?? (sourceRate > 0 ? sourceRate : 48_000)
+            let roundedRate = Int(rate.rounded())
+            if roundedRate != 44_100, roundedRate != 48_000 {
+                rate = 48_000
+            }
+            audioTarget = (rate, channels)
+
             let decodeSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVLinearPCMBitDepthKey: 32,
                 AVLinearPCMIsFloatKey: true,
                 AVLinearPCMIsBigEndianKey: false,
                 AVLinearPCMIsNonInterleaved: false,
+                AVSampleRateKey: rate,
+                AVNumberOfChannelsKey: channels,
             ]
             let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: decodeSettings)
             if reader.canAdd(output) {
@@ -247,18 +282,12 @@ actor TranscodeEngine {
         }
 
         var audioInput: AVAssetWriterInput?
-        if audioOutput != nil {
-            let channels = min(
-                max(sourceAudioChannels > 0 ? sourceAudioChannels : 2, 1),
-                max(request.audioMaxChannels, 1)
-            )
-            var sampleRate = request.audioSampleRate ?? (sourceAudioSampleRate > 0 ? sourceAudioSampleRate : 48_000)
-            sampleRate = min(max(sampleRate, 8_000), 48_000)
+        if let target = audioTarget, audioOutput != nil {
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVEncoderBitRateKey: request.audioBitrate,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
+                AVSampleRateKey: target.rate,
+                AVNumberOfChannelsKey: target.channels,
             ]
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             if writer.canAdd(input) {
@@ -315,9 +344,21 @@ actor TranscodeEngine {
                 group.addTask {
                     var stats = PumpStats()
                     var lastReport = started
-                    while let ready = try await videoProvider.next() {
+                    while true {
+                        // 读取失败与写入失败分开包装，避免原始系统错误直接透传到 UI
+                        let ready: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?
+                        do {
+                            ready = try await videoProvider.next()
+                        } catch {
+                            throw TranscodeEngineError.readWriteFailed("视频读取失败：\(errorText(error))")
+                        }
+                        guard let ready else { break }
                         if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
-                        try await videoReceiver.append(ready)
+                        do {
+                            try await videoReceiver.append(ready)
+                        } catch {
+                            throw TranscodeEngineError.readWriteFailed("视频写入失败：\(errorText(error))")
+                        }
                         stats.frames += 1
                         let pts = ready.presentationTimeStamp.seconds
                         if pts.isFinite { stats.processedSeconds = max(stats.processedSeconds, pts) }
@@ -348,9 +389,20 @@ actor TranscodeEngine {
 
                 if let audioProvider, let audioReceiver {
                     group.addTask {
-                        while let ready = try await audioProvider.next() {
+                        while true {
+                            let ready: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?
+                            do {
+                                ready = try await audioProvider.next()
+                            } catch {
+                                throw TranscodeEngineError.readWriteFailed("音频读取失败：\(errorText(error))")
+                            }
+                            guard let ready else { break }
                             if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
-                            try await audioReceiver.append(ready)
+                            do {
+                                try await audioReceiver.append(ready)
+                            } catch {
+                                throw TranscodeEngineError.readWriteFailed("音频写入失败：\(errorText(error))")
+                            }
                         }
                         audioReceiver.finish()
                         return PumpStats()
@@ -421,7 +473,8 @@ actor TranscodeEngine {
             wallSeconds: wallSeconds,
             averageSpeed: durationSeconds / max(wallSeconds, 0.0001),
             usedComposition: needsComposition,
-            verificationIssues: verificationIssues
+            verificationIssues: verificationIssues,
+            notes: notes
         )
     }
 

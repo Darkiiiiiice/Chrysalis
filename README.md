@@ -6,7 +6,7 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 
 ## 状态
 
-**P0 技术验证已完成**（2026-10-17，全部通过标准达成）。**P1 单文件 MVP 代码已就绪，待手工验收**（2026-10-17 修复输出目录沙盒写入权限，并迁移到 macOS 27 新 AVFoundation 读写 API，零警告）。
+**P0 技术验证已完成**（2026-10-17，全部通过标准达成）。**P1 单文件 MVP 代码已就绪，待手工验收**（2026-10-17 修复输出目录沙盒写入权限、迁移 macOS 27 新 AVFoundation 异步读写 API、修复低采样率音源 AAC 编码参数被拒与错误横幅布局，零警告）。
 
 - Xcode 工程：[`Chrysalis/Chrysalis.xcodeproj`](Chrysalis/Chrysalis.xcodeproj) —— 仅 macOS 27.0+、Swift 6（严格并发）、App Sandbox、Hardened Runtime
 - 转码读写：macOS 27 新 AVFoundation 异步模型（`AVAssetReader.outputProvider` / `AVAssetWriter.inputReceiver`，视频/音频各一个并发泵；`AVVideoComposition.Configuration` 旋转合成）

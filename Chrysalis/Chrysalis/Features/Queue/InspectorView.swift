@@ -112,6 +112,14 @@ struct InspectorView: View {
                     store.revealInFinder(outputURL)
                 }
             }
+            if !job.notes.isEmpty {
+                ForEach(job.notes, id: \.self) { note in
+                    Text("· \(note)")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .textSelection(.enabled)
+                }
+            }
         }
     }
 
