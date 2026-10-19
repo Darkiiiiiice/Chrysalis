@@ -24,6 +24,12 @@ struct ChrysalisApp: App {
         .commands {
             AppCommands(store: store)
         }
+
+        Window("关于蝉蜕", id: "about") {
+            AboutScreen()
+                .tint(Theme.accent)
+        }
+        .windowResizability(.contentSize)
     }
 }
 
