@@ -7,6 +7,9 @@ struct SettingsScreen: View {
     @State private var credentialInput = ""
     @State private var validationMessage: String?
     @State private var isSavingCredential = false
+    @State private var isTestingProxy = false
+    @State private var proxyTestMessage: String?
+    @State private var proxyTestSucceeded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -16,6 +19,7 @@ struct SettingsScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.s4) {
                     tmdbSection
+                    proxySection
                     hardwareSection
                 }
                 .padding(Theme.Size.contentInset)
@@ -23,6 +27,9 @@ struct SettingsScreen: View {
             }
         }
         .background(Theme.bg)
+        .onChange(of: store.proxySettings) {
+            proxyTestMessage = nil
+        }
     }
 
     private var header: some View {
@@ -30,7 +37,7 @@ struct SettingsScreen: View {
             Text("设置")
                 .font(Theme.TextStyle.section)
                 .foregroundStyle(Theme.textPrimary)
-            Text("电影元数据与硬件能力")
+            Text("电影元数据、网络代理与硬件能力")
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
             Spacer()
@@ -88,6 +95,79 @@ struct SettingsScreen: View {
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
                 .textSelection(.enabled)
+        }
+    }
+
+    // MARK: 网络代理（设计文档 §7.5）
+
+    @ViewBuilder
+    private var proxySection: some View {
+        @Bindable var store = store
+        InspectorSection(title: "网络代理") {
+            Toggle("通过代理访问 TMDB", isOn: $store.proxySettings.isEnabled)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(Theme.TextStyle.body)
+
+            HStack(spacing: Theme.Spacing.s2) {
+                Picker("类型", selection: $store.proxySettings.kind) {
+                    ForEach(ProxySettings.Kind.allCases, id: \.self) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 150)
+
+                TextField("代理服务器地址", text: $store.proxySettings.host)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 160)
+
+                HStack(spacing: Theme.Spacing.s1) {
+                    Text("端口")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    TextField("7890", value: $store.proxySettings.port, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                }
+            }
+            .disabled(!store.proxySettings.isEnabled)
+
+            if let message = store.proxySettings.validationMessage {
+                Text(message)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: Theme.Spacing.s2) {
+                TextButton(title: isTestingProxy ? "测试中…" : "测试连接", isEnabled: !isTestingProxy) {
+                    testProxyConnection()
+                }
+                if let proxyTestMessage {
+                    Text(proxyTestMessage)
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(proxyTestSucceeded ? Theme.success : Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Text("国内直连 TMDB 常不可达，可在此填写本地代理（如 Clash 默认 127.0.0.1:7890）。代理只作用于 TMDB 的搜索、详情与海报；未启用时遵循系统代理设置。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func testProxyConnection() {
+        guard !isTestingProxy else { return }
+        isTestingProxy = true
+        proxyTestMessage = nil
+        Task {
+            let error = await store.testTMDBReachability()
+            isTestingProxy = false
+            proxyTestSucceeded = error == nil
+            proxyTestMessage = error ?? "连接成功：已能访问 TMDB。"
         }
     }
 

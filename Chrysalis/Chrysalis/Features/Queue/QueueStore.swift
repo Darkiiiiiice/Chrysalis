@@ -43,6 +43,10 @@ final class QueueStore {
     var confirmMovieContext: ConfirmMovieContext?
     /// TMDB 凭据是否已配置（设置页与确认 Sheet 展示）。
     private(set) var isTMDBConfigured = false
+    /// TMDB 网络代理设置（设计文档 §7.5；改动即时持久化并生效）。
+    var proxySettings = ProxySettingsStore.load() {
+        didSet { ProxySettingsStore.save(proxySettings) }
+    }
 
     /// 预设仓库（内置 + 自定义；设计文档 §6.6 / §9）。
     let presets = PresetStore()
@@ -645,6 +649,25 @@ final class QueueStore {
     /// 清除 TMDB 元数据缓存（搜索/详情/海报）。
     func clearMetadataCache() {
         Task { await metadataService.clearCache() }
+    }
+
+    /// 网络/代理连通性测试（设计文档 §7.5）：请求 TMDB 配置端点探测可达性。
+    /// 探测使用伪 Key，401/429 均说明网络已到达 TMDB；nil 表示连通，否则返回中文失败文案。
+    func testTMDBReachability() async -> String? {
+        let probe = TMDBCredential(kind: .v3Key, value: "chrysalis-connectivity-probe")
+        do {
+            try await metadataService.validate(probe)
+            return nil
+        } catch let error as TMDBError {
+            switch error {
+            case .invalidKey, .rateLimited:
+                return nil
+            default:
+                return error.errorDescription ?? "网络请求失败。"
+            }
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     // MARK: - 状态更新（MainActor）

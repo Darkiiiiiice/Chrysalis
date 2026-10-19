@@ -155,7 +155,7 @@ private struct TMDBEmptyResponse: Decodable {}
 // MARK: - 客户端
 
 /// TMDB API 客户端（设计文档 §7.5）：URLSession + Codable，零第三方依赖。
-/// 传输层可注入（测试用 mock），生产用 `urlSessionTransport`。
+/// 传输层可注入（测试用 mock），生产用 `liveTransport()`（按代理设置构建会话）。
 struct TMDBClient: Sendable {
     typealias Transport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
@@ -218,13 +218,18 @@ struct TMDBClient: Sendable {
         return components.url
     }
 
-    /// 生产传输：URLSession；错误统一在 `get`/`fetchData` 里归类。
-    static let urlSessionTransport: Transport = { request in
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw TMDBError.network("响应格式无效")
+    /// 生产传输：URLSession（按代理设置构建/复用会话，设计文档 §7.5）；
+    /// 错误统一在 `get`/`fetchData` 里归类。
+    static func liveTransport(
+        provider: ProxySessionProvider = ProxySessionProvider()
+    ) -> Transport {
+        { request in
+            let (data, response) = try await provider.session().data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw TMDBError.network("响应格式无效")
+            }
+            return (data, http)
         }
-        return (data, http)
     }
 
     // MARK: 请求

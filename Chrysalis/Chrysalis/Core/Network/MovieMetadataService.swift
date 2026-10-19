@@ -20,7 +20,7 @@ actor MovieMetadataService {
 
     init(
         cache: MetadataCache = MetadataCache(),
-        transport: @escaping TMDBClient.Transport = TMDBClient.urlSessionTransport
+        transport: @escaping TMDBClient.Transport = TMDBClient.liveTransport()
     ) {
         self.cache = cache
         self.transport = transport
