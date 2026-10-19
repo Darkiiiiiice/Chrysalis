@@ -4,6 +4,28 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 
 > 「蝉蜕」取意「金蝉脱壳」——转码即蜕变：旧壳（容器）留在身后，影像本体无损，飞向新形。英文名「Chrysalis」是蛹壳——蜕变发生的静默容器；原文件保留、输出原子落盘，正合其意。
 
+## 软件特色
+
+- **纯 Apple 技术栈，零第三方依赖**：Swift 6（严格并发）+ SwiftUI + AVFoundation + VideoToolbox，不引入 FFmpeg / libav。
+- **硬件加速是硬性要求**：默认强制 VideoToolbox 硬件编码（H.264 / HEVC / ProRes 全覆盖）；硬件不可用时任务明确失败，**绝不静默回退软件**。
+- **快**：M1 Pro 实测 1080p H.264 → H.264 **6.2x**、4K HEVC → 1080p H.264 **5.7x**（详见 [P0 实测报告](docs/P0-实测报告.md)）。
+- **本地优先、安全落盘**：拖入即转码，输出原子落盘（失败/取消不留半个文件）；App Sandbox + 安全书签；重启自动恢复队列，中断任务可重试。
+- **批量队列**：多文件串行执行、单任务取消/重试、一键清除已结束；缩略图、实时进度、速度与剩余时间。
+- **5 个内置预设 + 可视化预设编辑器**：兼容优先 / 均衡 / 小体积 / 高质量 / 剪辑用 ProRes；自定义分辨率、帧率、容器、音频、码率实时体积估算。
+- **码率精细控制**：平均码率 / 质量优先 / 目标大小三选一；关键帧间隔、H.264 Profile、ProRes 422 全家族 + PCM 16/24-bit。
+- **电影元数据（可选 TMDB）**：自动匹配 → **人工确认后才转码**（永不静默写入）；标题/导演/演员/海报写入 MP4/MOV 容器；支持本地代理；凭据只存 Keychain。
+- **历史记录**：终态自动留存（上限 500 条），一键 Finder 定位、重新转码、编辑元数据；转码完成/失败系统通知（可关）。
+- **极简克制的界面**：暗色优先、单一强调色、等宽数字、完整 Reduce Motion 降级；中文本地化。
+
+## 截图
+
+<p align="center">
+  <img src="docs/screenshots/queue.png" width="49%" alt="队列：拖入视频、批量转码">
+  <img src="docs/screenshots/presets.png" width="49%" alt="预设：内置只读 + 自定义编辑">
+  <img src="docs/screenshots/history.png" width="49%" alt="历史：Finder 定位 / 重新转码 / 编辑元数据">
+  <img src="docs/screenshots/settings.png" width="49%" alt="设置：TMDB 凭据、代理、通知、硬件能力矩阵">
+</p>
+
 ## 状态
 
 **P0 技术验证 / P1 单文件 MVP / P2 队列与预设 / P3 电影元数据 / P3.5 预设编辑增强 / P3.6 TMDB 网络代理 / P4 参数与格式已完成**（2026-10-19）。P2 通过 41 项、P3 通过 140 项，并入 P3.5、P3.6 与 P4 后共 **330 项自动化检查全过**（含经本机代理的真实连通测试；P4 新增 113 项）；界面走查待用户确认（P3 自动匹配需自备 TMDB API Key，无 Key 亦可纯手动填写元数据）。
@@ -131,7 +153,8 @@ Chrysalis/
 ├── AGENTS.md          # 开发约定（开发 agent 执行说明）
 ├── docs/
 │   ├── 设计文档.md     # 完整设计方案（唯一事实来源）
-│   └── P0-实测报告.md  # P0 实测证据与结论
+│   ├── P0-实测报告.md  # P0 实测证据与结论
+│   └── screenshots/    # README 截图（App `--capture` 模式自动生成）
 ├── Chrysalis/         # Xcode 工程（Chrysalis.xcodeproj）+ App 源码
 │   └── Chrysalis/     # App 目标源码：App / Core / Features / UI / Resources
 └── Validation/
