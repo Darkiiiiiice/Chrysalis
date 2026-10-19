@@ -2,7 +2,7 @@ import CoreMedia
 import Foundation
 
 /// 输入媒体信息快照（值类型，跨隔离域安全传递；设计文档 §6.1 预检的产物）。
-struct MediaInfo: Sendable, Equatable {
+struct MediaInfo: Sendable, Equatable, Codable {
     /// 容器显示名（MP4 / MOV / M4V）。
     var containerLabel: String
     var fileSizeBytes: Int64
@@ -23,7 +23,7 @@ struct MediaInfo: Sendable, Equatable {
 }
 
 /// 视频轨信息。
-struct VideoStreamInfo: Sendable, Equatable {
+struct VideoStreamInfo: Sendable, Equatable, Codable {
     var codecFourCC: String
     var codecName: String
     var displayWidth: Int
@@ -34,7 +34,7 @@ struct VideoStreamInfo: Sendable, Equatable {
 }
 
 /// 音频轨信息。
-struct AudioStreamInfo: Sendable, Equatable {
+struct AudioStreamInfo: Sendable, Equatable, Codable {
     var codecFourCC: String
     var codecName: String
     var channelCount: Int

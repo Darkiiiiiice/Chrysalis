@@ -94,6 +94,13 @@ struct InspectorView: View {
             InspectorRow(label: "编码", value: job.preset.videoCodec.displayName)
             InspectorRow(label: "分辨率", value: "与源一致（不放大）")
             InspectorRow(label: "帧率", value: "保持源帧率")
+            if let info = job.mediaInfo, let video = info.video {
+                let bitrate = job.preset.averageBitrate(
+                    videoWidth: video.displayWidth,
+                    videoHeight: video.displayHeight
+                )
+                InspectorRow(label: "码率", value: "\(Fmt.mbps(bitrate))（按像素缩放）")
+            }
             InspectorRow(label: "音频", value: "AAC \(job.preset.audio.bitrate / 1000) kbps")
             if let info = job.mediaInfo, let video = info.video {
                 let estimate = job.preset.estimatedBytes(
@@ -165,7 +172,7 @@ struct InspectorView: View {
                     pasteboard.setString(error, forType: .string)
                 }
             } else {
-                InspectorRow(label: "状态", value: "无")
+                InspectorRow(label: "状态", value: idleStatusText(job))
             }
 
             if !job.verificationIssues.isEmpty {
@@ -176,6 +183,21 @@ struct InspectorView: View {
                         .textSelection(.enabled)
                 }
             }
+
+            if job.state.isRetryable {
+                TextButton(title: "重试任务", tint: Theme.accent) {
+                    store.retryJob(job.id)
+                }
+            }
+        }
+    }
+
+    /// 无错误文本时的状态说明（取消/中断都可重试）。
+    private func idleStatusText(_ job: TranscodeJob) -> String {
+        switch job.state {
+        case .interrupted: "已中断（可重试）"
+        case .cancelled: "已取消（可重试）"
+        default: "无"
         }
     }
 }

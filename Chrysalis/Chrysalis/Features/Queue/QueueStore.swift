@@ -32,10 +32,17 @@ final class QueueStore {
     private(set) var banner: Banner?
     private(set) var isRunningBatch = false
     private(set) var outputDirectory: URL?
+    /// 添加 Sheet 待入队的文件（设计文档 §8.6 添加文件）。
+    private(set) var pendingAddURLs: [URL] = []
+
+    /// 预设仓库（内置 + 自定义；设计文档 §6.6 / §9）。
+    let presets = PresetStore()
 
     var selectedJobID: UUID?
     var isInspectorPresented = false
     var isAddFilesPresented = false
+    /// 轻量添加 Sheet 的呈现状态。
+    var isAddSheetPresented = false
     var isChooseOutputPresented = false
     var isDropTargeted = false
     var sidebarSelection: SidebarItem = .queue
@@ -48,27 +55,32 @@ final class QueueStore {
     private var bannerDismissTask: Task<Void, Never>?
     /// 已选择输出目录的沙盒作用域持有（选择器返回的 URL 需要显式开始访问）。
     private var heldOutputScopeURL: URL?
+    /// 输出目录的 App Scope 安全书签（重启恢复，设计文档 §9）。
+    private var outputDirectoryBookmarkData: Data?
 
     // MARK: - 生命周期
 
-    /// 启动时探测硬件能力（设计文档 §7）。
+    /// 启动时：探测硬件能力（设计文档 §7）→ 恢复上次队列（设计文档 §9）。
     func bootstrap() async {
-        guard capabilities == nil else { return }
-        let probe = await Task.detached(priority: .userInitiated) {
-            VideoToolboxCapabilities.probe()
-        }.value
-        capabilities = probe
-        Log.app.info("硬件能力：\(probe.summaryText, privacy: .public)")
+        if capabilities == nil {
+            let probe = await Task.detached(priority: .userInitiated) {
+                VideoToolboxCapabilities.probe()
+            }.value
+            capabilities = probe
+            Log.app.info("硬件能力：\(probe.summaryText, privacy: .public)")
+        }
+        restoreQueue()
     }
 
     // MARK: - 添加文件
 
-    /// 拖放 / 文件选择入口：过滤容器 → 入队 → 异步预检。
-    func addFiles(_ urls: [URL]) {
+    /// 拖放 / 文件选择入口（设计文档 §8.6）：过滤容器与重复项后，打开轻量添加 Sheet。
+    func prepareAdd(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
 
         var ignoredCount = 0
         var duplicateCount = 0
+        var accepted: [URL] = []
 
         for url in urls {
             let ext = url.pathExtension.lowercased()
@@ -76,13 +88,13 @@ final class QueueStore {
                 ignoredCount += 1
                 continue
             }
-            if jobs.contains(where: { $0.inputURL == url && !$0.state.isTerminal }) {
+            let path = url.path(percentEncoded: false)
+            if jobs.contains(where: { $0.inputURL.path(percentEncoded: false) == path && !$0.state.isTerminal })
+                || pendingAddURLs.contains(where: { $0.path(percentEncoded: false) == path }) {
                 duplicateCount += 1
                 continue
             }
-            let job = TranscodeJob(inputURL: url)
-            jobs.append(job)
-            inspect(jobID: job.id)
+            accepted.append(url)
         }
 
         if ignoredCount > 0 {
@@ -90,6 +102,32 @@ final class QueueStore {
         } else if duplicateCount > 0 {
             showBanner(kind: .info, message: "\(duplicateCount) 个文件已在队列中，已跳过重复项。")
         }
+
+        guard !accepted.isEmpty else { return }
+        pendingAddURLs = accepted
+        isAddSheetPresented = true
+    }
+
+    /// 添加 Sheet 确认：按所选预设入队并异步预检。
+    func confirmAdd(presetID: String) {
+        let preset = presets.preset(id: presetID) ?? presets.selectedPreset
+        presets.select(id: preset.id)
+        enqueue(pendingAddURLs, preset: preset)
+        pendingAddURLs = []
+    }
+
+    func cancelAdd() {
+        pendingAddURLs = []
+    }
+
+    private func enqueue(_ urls: [URL], preset: TranscodePreset) {
+        for url in urls {
+            var job = TranscodeJob(inputURL: url, preset: preset)
+            job.inputBookmark = BookmarkStore.makeBookmark(for: url)
+            jobs.append(job)
+            inspect(jobID: job.id)
+        }
+        saveQueue()
     }
 
     private func inspect(jobID: UUID) {
@@ -131,6 +169,7 @@ final class QueueStore {
             jobs[index].errorText = message
             showBanner(kind: .error, message: "\(name)：\(message)")
         }
+        saveQueue()
     }
 
     private func loadThumbnail(for jobID: UUID) {
@@ -166,7 +205,8 @@ final class QueueStore {
 
         // 预检通过才真正切换；旧目录作用域此时释放
         previousHeld?.stopAccessingSecurityScopedResource()
-        heldOutputScopeURL = scoped ? url : nil // P2 起改为持久化安全书签
+        heldOutputScopeURL = scoped ? url : nil
+        outputDirectoryBookmarkData = BookmarkStore.makeBookmark(for: url)
         outputDirectory = url
 
         // 切换目录时清理残留临时文件（设计文档 §6.4）
@@ -174,6 +214,7 @@ final class QueueStore {
         if !removed.isEmpty {
             Log.engine.info("清理残留临时文件 \(removed.count) 个")
         }
+        saveQueue()
     }
 
     /// 真实写入探针：创建并删除一个临时文件，验证目录可写。
@@ -332,8 +373,9 @@ final class QueueStore {
             jobs[index].state = .cancelling
             engines[id]?.cancel()
         default:
-            break
+            return
         }
+        saveQueue()
     }
 
     /// 取消全部：停止批处理并取消当前任务；排队中的任务保留（再次「开始」继续）。
@@ -343,6 +385,23 @@ final class QueueStore {
             jobs[index].state = .cancelling
             engines[jobs[index].id]?.cancel()
         }
+        saveQueue()
+    }
+
+    /// 重试：失败 / 取消 / 中断的任务回到排队（保留预设与媒体信息）。
+    func retryJob(_ id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }), jobs[index].state.isRetryable else { return }
+        jobs[index].state = .queued
+        jobs[index].progress = nil
+        jobs[index].errorText = nil
+        jobs[index].outputURL = nil
+        jobs[index].outputBytes = nil
+        jobs[index].verificationIssues = []
+        jobs[index].notes = []
+        if jobs[index].mediaInfo == nil {
+            inspect(jobID: id)
+        }
+        saveQueue()
     }
 
     func clearCompleted() {
@@ -355,6 +414,7 @@ final class QueueStore {
         if let selected = selectedJobID, !jobs.contains(where: { $0.id == selected }) {
             selectedJobID = nil
         }
+        saveQueue()
     }
 
     // MARK: - 检查器
@@ -373,6 +433,7 @@ final class QueueStore {
     private func updateState(id: UUID, state: TranscodeJob.State) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[index].state = state
+        saveQueue()
     }
 
     private func fail(id: UUID, message: String) {
@@ -381,6 +442,7 @@ final class QueueStore {
         jobs[index].errorText = message
         Log.engine.error("任务失败：\(message, privacy: .public)")
         showBanner(kind: .error, message: "\(jobs[index].displayName)：\(message)")
+        saveQueue()
     }
 
     private func applyProgress(_ progress: TranscodeProgress, to id: UUID) {
@@ -408,6 +470,91 @@ final class QueueStore {
         Log.engine.info(
             "完成 \(outcome.outputURL.lastPathComponent, privacy: .public)：\(Fmt.speed(outcome.averageSpeed), privacy: .public)"
         )
+        saveQueue()
+    }
+
+    // MARK: - 队列恢复与持久化（设计文档 §9）
+
+    /// 启动时恢复上次队列：解析安全书签；活跃任务变为 interrupted；失效授权明确报错。
+    private func restoreQueue() {
+        guard jobs.isEmpty, let archive = QueueArchive.load() else { return }
+
+        var restored: [TranscodeJob] = []
+        var interruptedCount = 0
+        var accessLostCount = 0
+
+        for persisted in archive.jobs {
+            var job = TranscodeJob(
+                id: persisted.id,
+                inputURL: URL(fileURLWithPath: persisted.inputPath),
+                preset: persisted.preset
+            )
+            job.inputBookmark = persisted.inputBookmark
+            job.mediaInfo = persisted.mediaInfo
+            job.outputURL = persisted.outputPath.map { URL(fileURLWithPath: $0) }
+            job.outputBytes = persisted.outputBytes
+            job.errorText = persisted.errorText
+            job.verificationIssues = persisted.verificationIssues
+            job.notes = persisted.notes
+            job.state = persisted.state.restoredState
+            if job.state == .interrupted {
+                interruptedCount += 1
+            }
+
+            if let bookmark = persisted.inputBookmark {
+                if let resolved = BookmarkStore.resolve(bookmark) {
+                    job.inputURL = resolved.url
+                    if resolved.isStale, let refreshed = BookmarkStore.makeBookmark(for: resolved.url) {
+                        job.inputBookmark = refreshed
+                    }
+                } else {
+                    accessLostCount += 1
+                    job.state = .failed("文件访问授权已失效，请重新添加此文件。")
+                    job.errorText = "文件访问授权已失效，请重新添加此文件。"
+                }
+            }
+            restored.append(job)
+        }
+
+        jobs = restored
+
+        // 输出目录书签：恢复访问权 + 清理残留临时文件
+        if let bookmark = archive.outputDirectoryBookmark {
+            if let resolved = BookmarkStore.resolve(bookmark) {
+                if isWritableDirectory(resolved.url) {
+                    heldOutputScopeURL = resolved.url.startAccessingSecurityScopedResource() ? resolved.url : nil
+                    outputDirectoryBookmarkData = resolved.isStale
+                        ? (BookmarkStore.makeBookmark(for: resolved.url) ?? bookmark)
+                        : bookmark
+                    outputDirectory = resolved.url
+                    OutputPlanner.cleanupOrphanTemps(in: resolved.url)
+                } else {
+                    showBanner(kind: .warning, message: "上次的输出文件夹不可用，请重新选择。")
+                }
+            } else {
+                showBanner(kind: .warning, message: "输出文件夹授权已失效，请重新选择。")
+            }
+        }
+
+        // 缺少媒体信息的任务补预检（含刚恢复的排队任务）
+        for job in jobs where job.mediaInfo == nil && !job.state.isTerminal {
+            inspect(jobID: job.id)
+        }
+
+        if interruptedCount > 0 {
+            showBanner(kind: .info, message: "已恢复队列：\(interruptedCount) 个任务因上次退出被中断，可重试。")
+        } else if accessLostCount > 0 {
+            showBanner(kind: .warning, message: "\(accessLostCount) 个任务的文件访问授权已失效，请重新添加。")
+        }
+
+        if !jobs.isEmpty {
+            Log.app.info("恢复队列 \(self.jobs.count) 个任务（中断 \(interruptedCount) 个）")
+        }
+        saveQueue()
+    }
+
+    private func saveQueue() {
+        QueueArchive(jobs: jobs, outputDirectoryBookmark: outputDirectoryBookmarkData).save()
     }
 
     // MARK: - 横幅

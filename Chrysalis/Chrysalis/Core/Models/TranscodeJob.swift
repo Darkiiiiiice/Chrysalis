@@ -10,6 +10,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
         case cancelling
         case completed
         case cancelled
+        /// 应用退出/崩溃时未写完的任务（启动恢复），可重试（设计文档 §5）。
+        case interrupted
         /// 人话错误（失败原因）。
         case failed(String)
 
@@ -22,14 +24,24 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
 
         var isTerminal: Bool {
             switch self {
-            case .completed, .cancelled, .failed: true
+            case .completed, .cancelled, .interrupted, .failed: true
+            default: false
+            }
+        }
+
+        /// 失败 / 取消 / 中断的任务可重试。
+        var isRetryable: Bool {
+            switch self {
+            case .cancelled, .interrupted, .failed: true
             default: false
             }
         }
     }
 
     let id: UUID
-    let inputURL: URL
+    var inputURL: URL
+    /// 输入文件的 App Scope 安全书签（重启恢复队列用，设计文档 §9）。
+    var inputBookmark: Data?
     var mediaInfo: MediaInfo?
     var preset: TranscodePreset
     var state: State
@@ -41,8 +53,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     /// 处理过程提示（引擎 notes，检查器展示）。
     var notes: [String]
 
-    init(inputURL: URL, preset: TranscodePreset = .defaultPreset) {
-        self.id = UUID()
+    init(id: UUID = UUID(), inputURL: URL, preset: TranscodePreset = .defaultPreset) {
+        self.id = id
         self.inputURL = inputURL
         self.preset = preset
         self.state = .queued

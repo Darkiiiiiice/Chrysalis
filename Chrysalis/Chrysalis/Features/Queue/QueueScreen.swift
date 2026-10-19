@@ -29,7 +29,7 @@ struct QueueScreen: View {
         ) { result in
             switch result {
             case .success(let urls):
-                store.addFiles(urls)
+                store.prepareAdd(urls)
             case .failure(let error):
                 store.showBanner(kind: .error, message: "选择文件失败：\(error.localizedDescription)")
             }
@@ -45,6 +45,9 @@ struct QueueScreen: View {
                 store.showBanner(kind: .error, message: "选择输出文件夹失败：\(error.localizedDescription)")
             }
         }
+        .sheet(isPresented: $store.isAddSheetPresented) {
+            AddFilesSheet()
+        }
         .navigationTitle("Chrysalis")
         .background(Theme.bg)
     }
@@ -55,11 +58,11 @@ struct QueueScreen: View {
         case .queue:
             QueueContentView()
         case .presets:
-            PlaceholderScreen(title: "预设", subtitle: "内置与自定义预设将在 P2 提供")
+            PresetsScreen()
         case .history:
             PlaceholderScreen(title: "历史", subtitle: "历史记录将在 P5 提供")
         case .settings:
-            PlaceholderScreen(title: "设置", subtitle: "设置页将在 P5 提供")
+            SettingsScreen()
         }
     }
 

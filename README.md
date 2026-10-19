@@ -6,8 +6,9 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 
 ## 状态
 
-**P0 技术验证已完成**（2026-10-17，全部通过标准达成）。**P1 单文件 MVP 代码已就绪，待手工验收**（2026-10-17 修复输出目录沙盒写入权限、迁移 macOS 27 新 AVFoundation 异步读写 API、修复低采样率音源 AAC 编码参数被拒与错误横幅布局，零警告）。
+**P0 技术验证 / P1 单文件 MVP / P2 队列与预设已完成**（2026-10-19）。P2 通过 41 项自动化检查（10 文件批量串行、HEVC 输出 `hvc1`、取消/重试、重启恢复、重名 `-1`、预设持久化）；界面走查待用户确认。
 
+- 已完成里程碑：P0 能力矩阵与吞吐实测（`docs/P0-实测报告.md`）；P1 单文件 H.264+AAC MP4（硬件编码、进度/取消/原子落盘、错误提示、应用图标）；P2 多文件队列（串行、取消/重试）、内置 4 预设 + 自定义预设（`presets.json`）、HEVC 预设、硬件能力矩阵（设置页）、输出目录安全书签 + 重启恢复队列（`queue.json`，活跃任务恢复为「已中断」）
 - Xcode 工程：[`Chrysalis/Chrysalis.xcodeproj`](Chrysalis/Chrysalis.xcodeproj) —— 仅 macOS 27.0+、Swift 6（严格并发）、App Sandbox、Hardened Runtime
 - 转码读写：macOS 27 新 AVFoundation 异步模型（`AVAssetReader.outputProvider` / `AVAssetWriter.inputReceiver`，视频/音频各一个并发泵；`AVVideoComposition.Configuration` 旋转合成）
 - 构建：`xcodebuild -project Chrysalis/Chrysalis.xcodeproj -scheme Chrysalis -configuration Debug build`（当前零警告、可直接运行）
@@ -31,26 +32,23 @@ macOS 上的本地视频转码工具：拖入视频，批量转码为 H.264 / HE
 - 最低系统 macOS 27.0（设计文档第 2 节；2026-10-17 由用户拍板，与开发机和最新 SDK 对齐）
 - 硬件能力已在 M1 Pro 实测：Apple H.264 (HW) / Apple HEVC (HW) / AppleProResHW 422 系列可用；无 AV1/VP9 编码器
 
-## P1 单文件 MVP（代码已就绪，待验收）
+## P2 队列与预设（已完成，待走查）
 
 已实现（源码在 `Chrysalis/Chrysalis/`）：
 
-1. 工程：仅 macOS 27.0+、Swift 6 语言模式、App Sandbox（用户选择文件读写）、Hardened Runtime；无 iOS 残留配置。
-2. 设计 Token：Asset Catalog 12 个颜色（Any/Dark 两套，视图零硬编码 hex）；字体、间距、圆角、动效在 `UI/Theme.swift`；24px 拖放网格。
-3. 两栏 `NavigationSplitView`（侧边栏 208 + 详情）+ 原生 toolbar（添加 / 开始 / 取消 / 输出文件夹 / 检查器）+ `⌘I` 可隐藏检查器（304px）。
-4. 拖放与文件选择（MP4/MOV/M4V；其他类型忽略并轻提示）、媒体信息预检（容器/轨道/尺寸/帧率/码率/音频/HDR/硬件解码）。
-5. 单文件 H.264 + AAC 输出 MP4，强制硬件编码（`AVVideoEncoderSpecificationKey` + `RequireHardwareAcceleratedVideoEncoder`）；音频解码为 LPCM 后统一编码 AAC-LC 192 kbps。
-6. 进度/速度/ETA（EMA，UI ≤10Hz）、取消（无临时文件残留）、原子落盘（`.chrysalis-*.tmp` → 最终名，重名加 `-1`）、基础错误提示（inline banner + 检查器「错误」区，可复制详情）。
+1. 队列：多文件串行执行、单任务取消/重试、清空已完成；10 文件批量已自动化验证。
+2. 预设：4 个内置（兼容优先 / 均衡 / 小体积 / 高质量，参数见设计文档 §6.6）只读，「复制为自定义」后可编辑名称、视频编码（H.264/HEVC）、1080p 基准码率、音频码率；自定义存 `Application Support/Chrysalis/presets.json`，选择持久化。
+3. HEVC 预设：均衡 / 高质量；输出 MP4（`hvc1`）已自动化验证。
+4. 硬件能力矩阵：设置页只读展示各编码器的 HW 状态与名称（绿点/灰点）。
+5. 输出目录安全书签（App Scope，`Chrysalis.entitlements`）+ 重启恢复队列：`queue.json`，活跃任务恢复为「已中断（可重试）」。
+6. 添加 Sheet：文件列表 + 预设选择（「这些是电影」总开关随 P3 加入）。
 
-验收步骤（手工）：
+走查步骤（手工）：
 
-1. Xcode 打开 `Chrysalis/Chrysalis.xcodeproj` 运行，或直接 `open` 构建产物。
-2. 工具栏「输出文件夹」选一个目录（**修复后请重新选择一次**：选择时会做写入探针，沙盒持有该目录访问权；不可写会直接提示换目录）→ 拖入一个 MP4 → 点「开始」。
-3. 预期：出现 HW 徽章与速度/剩余时间；完成后输出可播放；行尾显示输出大小。
-4. 取消验证：转码中途点行尾 ✕（hover 出现）或 `⌘.`；输出来源目录里不应留下 `.chrysalis-*.tmp`。
-5. 暗色/浅色切换检查界面是否符合 Token（无硬编码颜色）。
-
-> 已知 P1 边界：预设固定为「兼容优先」（P2 起可切换）；历史/设置/预设页为占位；软件回退开关不提供（保持硬性硬件要求）。
+1. 预设页：点击卡片选中（accent 描边 +「默认」标签）；「复制为自定义」→ 改名/改编码/改码率 → 保存；自定义卡片可「编辑/删除」。
+2. 拖入多个文件 → 添加 Sheet 选预设 → 添加 → 开始；点行尾 ↻ 可重试失败/取消/中断的任务。
+3. 转码中途退出 App，重开：任务显示「已中断（可重试）」；输出文件夹应自动恢复。
+4. 设置页查看硬件能力矩阵；检查器「输出」分区可见码率/预计大小。
 
 ## 目录
 

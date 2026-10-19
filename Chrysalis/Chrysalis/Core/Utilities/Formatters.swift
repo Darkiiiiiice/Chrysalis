@@ -38,6 +38,20 @@ enum Fmt {
         return String(format: "%.0f kbps", Double(bitsPerSecond) / 1000)
     }
 
+    /// 码率数值（Mbps，去掉多余小数），如 “8” / “2.5”。
+    static func mbpsNumber(_ bitsPerSecond: Int) -> String {
+        let value = Double(bitsPerSecond) / 1_000_000
+        if value.rounded() == value {
+            return String(format: "%.0f", value)
+        }
+        return String(format: "%.1f", value)
+    }
+
+    /// 码率数值 + 单位，如 “8 Mbps” / “2.5 Mbps”。
+    static func mbps(_ bitsPerSecond: Int) -> String {
+        "\(mbpsNumber(bitsPerSecond)) Mbps"
+    }
+
     static func sampleRate(_ hertz: Double) -> String {
         guard hertz > 0 else { return "—" }
         return String(format: "%.0f Hz", hertz)

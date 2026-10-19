@@ -92,6 +92,7 @@ struct JobRowView: View {
         switch job.state {
         case .preparing: "准备中…"
         case .cancelling: "取消中…"
+        case .interrupted: "已中断（可重试）"
         case .failed(let message): "失败：\(message)"
         default: job.metaLine
         }
@@ -99,6 +100,7 @@ struct JobRowView: View {
 
     private var secondaryColor: Color {
         if case .failed = job.state { return Theme.error }
+        if job.state == .interrupted { return Theme.warning }
         return Theme.textSecondary
     }
 
@@ -110,6 +112,12 @@ struct JobRowView: View {
             PresetChip(title: job.preset.name)
             acceleratorBadge
             statusNumbers
+
+            if job.state.isRetryable {
+                IconButton(systemImage: "arrow.clockwise", help: "重试") {
+                    store.retryJob(job.id)
+                }
+            }
 
             if shouldShowCancel {
                 IconButton(systemImage: "xmark.circle", help: "取消任务") {
@@ -169,6 +177,7 @@ struct JobRowView: View {
         case .cancelling: Theme.warning
         case .completed: Theme.success
         case .cancelled: Theme.textSecondary
+        case .interrupted: Theme.warning
         case .failed: Theme.error
         }
     }
@@ -192,6 +201,8 @@ struct JobRowView: View {
             ProgressLine(fraction: 1, color: Theme.success)
         case .cancelled:
             ProgressLine(fraction: 1, color: Theme.textSecondary)
+        case .interrupted:
+            ProgressLine(fraction: job.progress?.fraction ?? 1, color: Theme.warning)
         case .failed:
             ProgressLine(fraction: 1, color: Theme.error)
         }

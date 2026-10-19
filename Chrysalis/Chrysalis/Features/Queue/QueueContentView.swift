@@ -27,7 +27,7 @@ struct QueueContentView: View {
         }
         .background(Theme.bg)
         .dropDestination(for: URL.self) { urls, _ in
-            store.addFiles(urls)
+            store.prepareAdd(urls)
             return true
         } isTargeted: { targeted in
             store.isDropTargeted = targeted
