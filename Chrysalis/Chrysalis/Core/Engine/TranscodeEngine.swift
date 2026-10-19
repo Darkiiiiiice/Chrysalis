@@ -153,10 +153,21 @@ actor TranscodeEngine {
         }
         let mediaFPS = nominalFPS > 0 ? nominalFPS : 30
 
-        // 保持源分辨率与帧率；仅旋转（preferredTransform 非单位阵）走合成慢路径。
+        // 输出尺寸与帧率（设计文档 P3.5）：短边匹配、只缩不放、偶数对齐；帧率只降不升。
+        // 旋转 / 偶数对齐 / 缩放 / 帧率任一需要改变时走合成慢路径。
         let oriented = VideoGeometry.orientedSize(naturalSize: naturalSize, preferredTransform: preferredTransform)
-        let renderSize = VideoGeometry.evenSize(oriented)
-        let needsComposition = preferredTransform != .identity
+        let sourceSize = VideoGeometry.evenSize(oriented)
+        let renderSize = request.resolution.renderSize(
+            sourceWidth: Int(oriented.width.rounded()),
+            sourceHeight: Int(oriented.height.rounded())
+        ) ?? sourceSize
+        let outputFPS = request.frameRate.effectiveFrameRate(sourceFPS: mediaFPS)
+        var compositionReasons: [String] = []
+        if preferredTransform != .identity { compositionReasons.append("旋转") }
+        if oriented != sourceSize { compositionReasons.append("偶数对齐") }
+        if renderSize != sourceSize { compositionReasons.append("缩放") }
+        if abs(outputFPS - mediaFPS) > 0.01 { compositionReasons.append("帧率") }
+        let needsComposition = !compositionReasons.isEmpty
 
         var notes: [String] = []
 
@@ -192,7 +203,7 @@ actor TranscodeEngine {
             let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)
             var compositionConfiguration = AVVideoComposition.Configuration()
             compositionConfiguration.renderSize = renderSize
-            compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(mediaFPS.rounded(), 1)))
+            compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(outputFPS.rounded(), 1)))
             compositionConfiguration.instructions = [instruction]
             let composition = AVVideoComposition(configuration: compositionConfiguration)
 
@@ -204,7 +215,7 @@ actor TranscodeEngine {
             )
             output.videoComposition = composition
             videoOutput = output
-            notes.append("旋转/变换：走 AVVideoComposition 慢路径")
+            notes.append("AVVideoComposition 慢路径（\(compositionReasons.joined(separator: " / "))）")
         } else {
             videoOutput = AVAssetReaderTrackOutput(
                 track: videoTrack,
@@ -218,11 +229,11 @@ actor TranscodeEngine {
         }
 
         // 音频目标格式（设计文档 §6.3）：解码端直接输出「目标采样率 + 目标声道」的 LPCM，
-        // 保证读写两端格式严格一致。AAC 编码器对不同采样率有各自的合法码率上限
-        // （实测 22.05 kHz 立体声上限 128 kbps），非 44.1/48 kHz 的源统一规整到 48 kHz，
-        // 这样在任意预设码率下都合法；多声道源在解码端下混并给出提示。
+        // 保证读写两端格式严格一致。AAC 编码器对不同采样率/声道有各自的合法码率上限
+        // （实测 22.05 kHz 立体声上限 128 kbps；单声道 320 kbps 被拒、256 可用），
+        // 非 44.1/48 kHz 的源统一规整到 48 kHz；多声道源在解码端下混并给出提示。
         var audioOutput: AVAssetReaderTrackOutput?
-        var audioTarget: (rate: Double, channels: Int)?
+        var audioTarget: (rate: Double, channels: Int, bitrate: Int)?
         if let audioTrack {
             var sourceChannels = 0
             var sourceRate: Double = 0
@@ -245,7 +256,11 @@ actor TranscodeEngine {
             if roundedRate != 44_100, roundedRate != 48_000 {
                 rate = 48_000
             }
-            audioTarget = (rate, channels)
+            let bitrate = AudioPolicy.effectiveBitrate(request.audioBitrate, channels: channels)
+            if bitrate != request.audioBitrate {
+                notes.append("单声道音频码率上限 256 kbps，已从 \(request.audioBitrate / 1000) kbps 调整")
+            }
+            audioTarget = (rate, channels, bitrate)
 
             let decodeSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
@@ -275,7 +290,7 @@ actor TranscodeEngine {
 
         let videoInput = AVAssetWriterInput(
             mediaType: .video,
-            outputSettings: videoOutputSettings(request: request, size: renderSize, fps: mediaFPS)
+            outputSettings: videoOutputSettings(request: request, size: renderSize, fps: outputFPS)
         )
         guard writer.canAdd(videoInput) else {
             throw TranscodeEngineError.writerSetupFailed("无法添加视频写入器（可能是硬件编码器不可用）")
@@ -285,7 +300,7 @@ actor TranscodeEngine {
         if let target = audioTarget, audioOutput != nil {
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVEncoderBitRateKey: request.audioBitrate,
+                AVEncoderBitRateKey: target.bitrate,
                 AVSampleRateKey: target.rate,
                 AVNumberOfChannelsKey: target.channels,
             ]

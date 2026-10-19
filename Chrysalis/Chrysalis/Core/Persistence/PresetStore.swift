@@ -2,6 +2,19 @@ import Foundation
 import Observation
 import os
 
+/// 预设编辑器提交的参数（设计文档 P3.5）。
+struct PresetDraft: Sendable, Equatable {
+    var name: String
+    var videoCodec: VideoCodec
+    var container: MediaContainer
+    var resolution: ResolutionSetting
+    var frameRate: FrameRateSetting
+    var bitrate1080p: Int
+    var audioBitrate: Int
+    var audioSampleRate: Double?
+    var audioChannels: Int
+}
+
 /// 预设仓库（设计文档 §9）：内置预设写在代码里；自定义预设存
 /// `Application Support/Chrysalis/presets.json`；新任务默认预设记在 UserDefaults。
 @MainActor
@@ -71,26 +84,18 @@ final class PresetStore {
         return nil
     }
 
-    /// 新建自定义预设（由来源预设复制，表单覆盖名称/编码/音频/基准码率）。
+    /// 新建自定义预设（由来源预设复制，表单覆盖视频/容器/分辨率/帧率/音频/基准码率）。
     @discardableResult
-    func create(
-        copyOf base: TranscodePreset,
-        name: String,
-        videoCodec: VideoCodec,
-        audioBitrate: Int,
-        bitrate1080p: Int
-    ) -> TranscodePreset? {
-        guard validationMessage(name: name, bitrate1080p: bitrate1080p, excludingID: nil) == nil else {
+    func create(copyOf base: TranscodePreset, draft: PresetDraft) -> TranscodePreset? {
+        guard validationMessage(name: draft.name, bitrate1080p: draft.bitrate1080p, excludingID: nil) == nil else {
             return nil
         }
         var preset = TranscodePreset.copy(
             of: base,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines)
+            name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        preset.bitrateRange = Self.scaled(base.bitrateRange, by: Double(bitrate1080p) / Double(base.bitrate1080p))
-        preset.videoCodec = videoCodec
-        preset.audio = .stereoAAC(bitrate: audioBitrate)
-        preset.bitrate1080p = bitrate1080p
+        preset.bitrateRange = Self.scaled(base.bitrateRange, by: Double(draft.bitrate1080p) / Double(base.bitrate1080p))
+        Self.apply(draft, to: &preset)
         customPresets.append(preset)
         saveCustomPresets()
         return preset
@@ -98,26 +103,31 @@ final class PresetStore {
 
     /// 编辑自定义预设；夹取范围随基准码率等比缩放（保持预设意图）。
     @discardableResult
-    func update(
-        id: String,
-        name: String,
-        videoCodec: VideoCodec,
-        audioBitrate: Int,
-        bitrate1080p: Int
-    ) -> TranscodePreset? {
-        guard validationMessage(name: name, bitrate1080p: bitrate1080p, excludingID: id) == nil,
+    func update(id: String, draft: PresetDraft) -> TranscodePreset? {
+        guard validationMessage(name: draft.name, bitrate1080p: draft.bitrate1080p, excludingID: id) == nil,
               let index = customPresets.firstIndex(where: { $0.id == id }) else {
             return nil
         }
         var updated = customPresets[index]
-        updated.bitrateRange = Self.scaled(updated.bitrateRange, by: Double(bitrate1080p) / Double(updated.bitrate1080p))
-        updated.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        updated.videoCodec = videoCodec
-        updated.audio = .stereoAAC(bitrate: audioBitrate)
-        updated.bitrate1080p = bitrate1080p
+        updated.bitrateRange = Self.scaled(updated.bitrateRange, by: Double(draft.bitrate1080p) / Double(updated.bitrate1080p))
+        updated.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.apply(draft, to: &updated)
         customPresets[index] = updated
         saveCustomPresets()
         return updated
+    }
+
+    private static func apply(_ draft: PresetDraft, to preset: inout TranscodePreset) {
+        preset.videoCodec = draft.videoCodec
+        preset.container = draft.container
+        preset.resolution = draft.resolution
+        preset.frameRate = draft.frameRate
+        preset.bitrate1080p = draft.bitrate1080p
+        preset.audio = AudioPolicy(
+            bitrate: draft.audioBitrate,
+            sampleRateOverride: draft.audioSampleRate,
+            maxChannels: draft.audioChannels
+        )
     }
 
     func delete(id: String) {
@@ -129,7 +139,7 @@ final class PresetStore {
         saveCustomPresets()
     }
 
-    private static func scaled(_ range: ClosedRange<Int>, by ratio: Double) -> ClosedRange<Int> {
+    nonisolated static func scaled(_ range: ClosedRange<Int>, by ratio: Double) -> ClosedRange<Int> {
         guard ratio > 0, ratio != 1 else { return range }
         let lower = Int((Double(range.lowerBound) * ratio).rounded())
         let upper = Int((Double(range.upperBound) * ratio).rounded())

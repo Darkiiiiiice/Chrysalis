@@ -372,14 +372,25 @@ final class QueueStore {
             posterData = await metadataService.posterData(path: posterPath)
         }
 
+        // P3.5：码率按目标分辨率（短边匹配、只缩不放）缩放
+        let targetSize = job.preset.resolution.renderSize(
+            sourceWidth: video.displayWidth,
+            sourceHeight: video.displayHeight
+        ) ?? CGSize(width: video.displayWidth, height: video.displayHeight)
+
         let request = TranscodeRequest(
             inputURL: job.inputURL,
             outputURL: outputURL,
             videoCodec: job.preset.videoCodec,
             container: job.preset.container,
+            resolution: job.preset.resolution,
+            frameRate: job.preset.frameRate,
             averageBitrate: job.preset.videoCodec.isProRes
                 ? nil
-                : job.preset.averageBitrate(videoWidth: video.displayWidth, videoHeight: video.displayHeight),
+                : job.preset.averageBitrate(
+                    videoWidth: Int(targetSize.width),
+                    videoHeight: Int(targetSize.height)
+                ),
             audioBitrate: job.preset.audio.bitrate,
             audioMaxChannels: job.preset.audio.maxChannels,
             audioSampleRate: job.preset.audio.sampleRateOverride,

@@ -7,6 +7,10 @@ struct TranscodeRequest: Sendable {
     var outputURL: URL
     var videoCodec: VideoCodec
     var container: MediaContainer
+    /// 输出分辨率档位（设计文档 P3.5：短边匹配 / 只缩不放 / 偶数对齐）。
+    var resolution: ResolutionSetting
+    /// 输出帧率档位（设计文档 P3.5：只降不升）。
+    var frameRate: FrameRateSetting
     /// 平均码率（bps）；ProRes 传 nil。
     var averageBitrate: Int?
     var audioBitrate: Int

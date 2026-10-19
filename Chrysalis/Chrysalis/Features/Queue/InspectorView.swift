@@ -168,21 +168,21 @@ struct InspectorView: View {
             InspectorRow(label: "预设", value: job.preset.name)
             InspectorRow(label: "容器", value: job.preset.container.displayName)
             InspectorRow(label: "编码", value: job.preset.videoCodec.displayName)
-            InspectorRow(label: "分辨率", value: "与源一致（不放大）")
-            InspectorRow(label: "帧率", value: "保持源帧率")
-            if let info = job.mediaInfo, let video = info.video {
-                let bitrate = job.preset.averageBitrate(
-                    videoWidth: video.displayWidth,
-                    videoHeight: video.displayHeight
-                )
+            InspectorRow(label: "分辨率", value: resolutionLabel(job))
+            InspectorRow(label: "帧率", value: frameRateLabel(job))
+            if let dims = targetDimensions(job) {
+                let bitrate = job.preset.averageBitrate(videoWidth: dims.width, videoHeight: dims.height)
                 InspectorRow(label: "码率", value: "\(Fmt.mbps(bitrate))（按像素缩放）")
             }
-            InspectorRow(label: "音频", value: "AAC \(job.preset.audio.bitrate / 1000) kbps")
-            if let info = job.mediaInfo, let video = info.video {
+            InspectorRow(
+                label: "音频",
+                value: "AAC \(job.preset.audio.bitrate / 1000) kbps · \(job.preset.audio.channelLabel)"
+            )
+            if let info = job.mediaInfo, let dims = targetDimensions(job) {
                 let estimate = job.preset.estimatedBytes(
                     durationSeconds: info.durationSeconds,
-                    videoWidth: video.displayWidth,
-                    videoHeight: video.displayHeight
+                    videoWidth: dims.width,
+                    videoHeight: dims.height
                 )
                 InspectorRow(label: "预计大小", value: "≈ \(Fmt.bytes(estimate))")
             }
@@ -204,6 +204,40 @@ struct InspectorView: View {
                 }
             }
         }
+    }
+
+    // MARK: 输出辅助（P3.5）
+
+    /// 目标输出尺寸（短边匹配、只缩不放）；无媒体信息时返回 nil。
+    private func targetDimensions(_ job: TranscodeJob) -> (width: Int, height: Int)? {
+        guard let video = job.mediaInfo?.video else { return nil }
+        if let target = job.preset.resolution.renderSize(
+            sourceWidth: video.displayWidth,
+            sourceHeight: video.displayHeight
+        ) {
+            return (Int(target.width), Int(target.height))
+        }
+        return (video.displayWidth, video.displayHeight)
+    }
+
+    private func resolutionLabel(_ job: TranscodeJob) -> String {
+        guard let video = job.mediaInfo?.video else { return job.preset.resolution.displayName }
+        if let target = job.preset.resolution.renderSize(
+            sourceWidth: video.displayWidth,
+            sourceHeight: video.displayHeight
+        ) {
+            return "\(Int(target.width))×\(Int(target.height))（\(job.preset.resolution.displayName)）"
+        }
+        return "与源一致（不放大）"
+    }
+
+    private func frameRateLabel(_ job: TranscodeJob) -> String {
+        guard let video = job.mediaInfo?.video else { return job.preset.frameRate.displayName }
+        let fps = job.preset.frameRate.effectiveFrameRate(sourceFPS: video.frameRate)
+        if job.preset.frameRate == .source {
+            return "\(String(format: "%.0f", fps)) fps（保持源）"
+        }
+        return "\(String(format: "%.0f", fps)) fps"
     }
 
     // MARK: 硬件

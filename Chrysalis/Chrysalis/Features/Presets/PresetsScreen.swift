@@ -116,12 +116,12 @@ struct PresetCard: View {
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
 
-            Text("保持源分辨率与帧率 · \(preset.bitrateLabel)，夹取 \(preset.bitrateRangeLabel)")
+            Text("\(preset.audioSummary) · \(preset.bitrateLabel)，夹取 \(preset.bitrateRangeLabel)")
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(2)
 
-            Text(preset.hourly1080pEstimateLabel)
+            Text(preset.hourlyEstimateLabel)
                 .font(Theme.TextStyle.numericSmall)
                 .foregroundStyle(Theme.textSecondary)
 
