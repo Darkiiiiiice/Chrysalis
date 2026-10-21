@@ -105,8 +105,14 @@ struct HistoryScreen: View {
                     }
                 }
                 TableColumn("预设") { entry in
-                    Text(entry.preset.name)
-                        .foregroundStyle(Theme.textSecondary)
+                    HStack(spacing: Theme.Spacing.s1) {
+                        Text(entry.preset.name)
+                            .foregroundStyle(Theme.textSecondary)
+                        if let enhancement = entry.enhancement {
+                            PresetChip(title: enhancement.badgeText)
+                                .accessibilityLabel("画质修复：\(enhancement.summary)")
+                        }
+                    }
                 }
                 TableColumn("输出") { entry in
                     Text(entry.outputFileName ?? "—")

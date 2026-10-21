@@ -238,6 +238,10 @@ struct JobRowView: View {
             StatusDot(color: dotColor, breathing: job.state.isActive)
             PresetChip(title: job.preset.name)
                 .accessibilityHidden(true)
+            if let enhancement = job.enhancement {
+                PresetChip(title: enhancement.badgeText)
+                    .accessibilityLabel("画质修复：\(enhancement.summary)")
+            }
             acceleratorBadge
             statusNumbers
 

@@ -148,10 +148,10 @@ final class QueueStore {
     }
 
     /// 添加 Sheet 确认：按所选预设入队并异步预检；「这些是电影」时启动元数据匹配。
-    func confirmAdd(presetID: String, markAsMovies: Bool) {
+    func confirmAdd(presetID: String, markAsMovies: Bool, enhancement: EnhancementSetting? = nil) {
         let preset = presets.preset(id: presetID) ?? presets.selectedPreset
         presets.select(id: preset.id)
-        enqueue(pendingAddURLs, preset: preset, markAsMovies: markAsMovies)
+        enqueue(pendingAddURLs, preset: preset, markAsMovies: markAsMovies, enhancement: enhancement)
         pendingAddURLs = []
     }
 
@@ -159,7 +159,12 @@ final class QueueStore {
         pendingAddURLs = []
     }
 
-    private func enqueue(_ urls: [URL], preset: TranscodePreset, markAsMovies: Bool = false) {
+    private func enqueue(
+        _ urls: [URL],
+        preset: TranscodePreset,
+        markAsMovies: Bool = false,
+        enhancement: EnhancementSetting? = nil
+    ) {
         var addedIDs: [UUID] = []
         for url in urls {
             var job = TranscodeJob(inputURL: url, preset: preset)
@@ -167,6 +172,7 @@ final class QueueStore {
             if markAsMovies {
                 job.mediaKind = .movie
             }
+            job.enhancement = enhancement
             jobs.append(job)
             addedIDs.append(job.id)
             inspect(jobID: job.id)
@@ -412,17 +418,21 @@ final class QueueStore {
         }
 
         // P3.5：码率按目标分辨率（短边匹配、只缩不放）缩放
-        let targetSize = job.preset.resolution.renderSize(
-            sourceWidth: video.displayWidth,
-            sourceHeight: video.displayHeight
-        ) ?? CGSize(width: video.displayWidth, height: video.displayHeight)
+        // 画质修复（设计文档 §7.6）：输出 = 源 ×2，码率按 2x 尺寸估算；分辨率档位锁定「保持源」
+        let enhanced = job.enhancement != nil
+        let targetSize = enhanced
+            ? CGSize(width: video.displayWidth * 2, height: video.displayHeight * 2)
+            : (job.preset.resolution.renderSize(
+                sourceWidth: video.displayWidth,
+                sourceHeight: video.displayHeight
+            ) ?? CGSize(width: video.displayWidth, height: video.displayHeight))
 
         let request = TranscodeRequest(
             inputURL: job.inputURL,
             outputURL: outputURL,
             videoCodec: job.preset.videoCodec,
             container: job.preset.container,
-            resolution: job.preset.resolution,
+            resolution: enhanced ? .source : job.preset.resolution,
             frameRate: job.preset.frameRate,
             averageBitrate: job.preset.videoCodec.isProRes
                 || job.preset.bitrateMode != .targetBitrate
@@ -446,7 +456,8 @@ final class QueueStore {
             requireHardware: true,
             encoderID: encoder.encoderID,
             metadata: job.movieMetadata,
-            posterData: posterData
+            posterData: posterData,
+            enhancement: job.enhancement
         )
 
         let engine = TranscodeEngine()
@@ -649,6 +660,15 @@ final class QueueStore {
     /// 未确认元数据的排队电影任务（设计文档 §7.5：拦截「开始全部」）。
     nonisolated static func unconfirmedMovieJobs(in jobs: [TranscodeJob]) -> [TranscodeJob] {
         jobs.filter { $0.state == .queued && $0.needsMetadataConfirmation }
+    }
+
+    /// 单任务画质修复设置（设计文档 §7.6）：仅排队中的任务可改；nil 关闭。
+    func setEnhancement(_ setting: EnhancementSetting?, jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .queued else { return }
+        guard jobs[index].enhancement != setting else { return }
+        jobs[index].enhancement = setting
+        saveQueue()
     }
 
     /// 自动匹配的最高分候选摘要（队列行 / 检查器直接展示，不必点开确认窗口）。

@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// 轻量添加 Sheet（设计文档 §8.6）：文件列表 + 预设选择 + 「这些是电影」总开关。
+/// 轻量添加 Sheet（设计文档 §8.6）：文件列表 + 预设选择 + 「这些是电影」总开关 + 画质修复。
 struct AddFilesSheet: View {
     @Environment(QueueStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     @State private var presetID = ""
     @State private var markAsMovies = false
+    @State private var enhancementEnabled = false
+    @State private var enhancement = EnhancementSetting.defaultNeural
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -98,6 +100,8 @@ struct AddFilesSheet: View {
                 .font(Theme.TextStyle.body)
                 .foregroundStyle(Theme.textPrimary)
 
+            enhancementControls
+
             HStack {
                 Spacer()
                 TextButton(title: "取消") {
@@ -105,12 +109,77 @@ struct AddFilesSheet: View {
                     dismiss()
                 }
                 PrimaryButton(title: "添加 \(store.pendingAddURLs.count) 个文件") {
-                    store.confirmAdd(presetID: presetID, markAsMovies: markAsMovies)
+                    store.confirmAdd(
+                        presetID: presetID,
+                        markAsMovies: markAsMovies,
+                        enhancement: enhancementEnabled ? enhancement : nil
+                    )
                     dismiss()
                 }
             }
         }
         .padding(Theme.Spacing.s3)
+    }
+
+    // MARK: 画质修复（设计文档 §7.6 / §8）
+
+    @ViewBuilder
+    private var enhancementControls: some View {
+        Toggle("画质修复（2x 超分，输出为源尺寸 ×2）", isOn: $enhancementEnabled)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(Theme.TextStyle.body)
+            .foregroundStyle(Theme.textPrimary)
+
+        if enhancementEnabled {
+            HStack(spacing: Theme.Spacing.s2) {
+                Text("修复")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Picker("模式", selection: Binding(
+                    get: { enhancement.mode },
+                    set: { mode in
+                        enhancement.mode = mode
+                    }
+                )) {
+                    Text(EnhancementMode.neural.displayName).tag(EnhancementMode.neural)
+                    Text(EnhancementMode.filter.displayName).tag(EnhancementMode.filter)
+                }
+                .labelsHidden()
+                .fixedSize()
+
+                if enhancement.isNeural {
+                    Picker("模型", selection: $enhancement.neuralModel) {
+                        ForEach(NeuralUpscalerModel.allCases, id: \.self) { model in
+                            Text(model.shortName).tag(model)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                Picker("强度", selection: $enhancement.strength) {
+                    ForEach(EnhancementStrength.allCases, id: \.self) { strength in
+                        Text(strength.displayName).tag(strength)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("分辨率锁定为「保持源」；\(enhancement.speedHint)")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                if enhancement.isNeural {
+                    Text("ML 超分为离线慢速处理，开始前可在检查器中调整。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+        }
     }
 
     private var selectedSummary: String {

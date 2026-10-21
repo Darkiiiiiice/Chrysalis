@@ -17,6 +17,7 @@ struct InspectorView: View {
                         inputSection(job)
                         metadataSection(job)
                         outputSection(job)
+                        enhancementSection(job)
                         hardwareSection(job)
                         errorSection(job)
                     }
@@ -244,9 +245,12 @@ struct InspectorView: View {
         }
     }
 
-    /// 目标输出尺寸（短边匹配、只缩不放）；无媒体信息时返回 nil。
+    /// 目标输出尺寸（短边匹配、只缩不放；画质修复 = 源 ×2）；无媒体信息时返回 nil。
     private func targetDimensions(_ job: TranscodeJob) -> (width: Int, height: Int)? {
         guard let video = job.mediaInfo?.video else { return nil }
+        if job.enhancement != nil {
+            return (video.displayWidth * 2, video.displayHeight * 2)
+        }
         if let target = job.preset.resolution.renderSize(
             sourceWidth: video.displayWidth,
             sourceHeight: video.displayHeight
@@ -258,6 +262,9 @@ struct InspectorView: View {
 
     private func resolutionLabel(_ job: TranscodeJob) -> String {
         guard let video = job.mediaInfo?.video else { return job.preset.resolution.displayName }
+        if job.enhancement != nil {
+            return "\(video.displayWidth * 2)×\(video.displayHeight * 2)（画质修复 ×2）"
+        }
         if let target = job.preset.resolution.renderSize(
             sourceWidth: video.displayWidth,
             sourceHeight: video.displayHeight
@@ -274,6 +281,98 @@ struct InspectorView: View {
             return "\(String(format: "%.0f", fps)) fps（保持源）"
         }
         return "\(String(format: "%.0f", fps)) fps"
+    }
+
+    // MARK: 画质修复（设计文档 §7.6 / §8）
+
+    /// 画质修复分区：排队中可编辑；运行后只读展示。
+    @ViewBuilder
+    private func enhancementSection(_ job: TranscodeJob) -> some View {
+        InspectorSection(title: "画质修复") {
+            if job.state == .queued {
+                HStack(spacing: Theme.Spacing.s2) {
+                    Toggle("开启", isOn: Binding(
+                        get: { job.enhancement != nil },
+                        set: { enabled in
+                            store.setEnhancement(
+                                enabled ? (job.enhancement ?? .defaultNeural) : nil,
+                                jobID: job.id
+                            )
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .font(Theme.TextStyle.body)
+                    Spacer()
+                }
+
+                if let setting = job.enhancement {
+                    HStack(spacing: Theme.Spacing.s2) {
+                        Picker("模式", selection: Binding(
+                            get: { setting.mode },
+                            set: { newValue in
+                                var updated = setting
+                                updated.mode = newValue
+                                store.setEnhancement(updated, jobID: job.id)
+                            }
+                        )) {
+                            Text(EnhancementMode.neural.displayName).tag(EnhancementMode.neural)
+                            Text(EnhancementMode.filter.displayName).tag(EnhancementMode.filter)
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+
+                        if setting.isNeural {
+                            Picker("模型", selection: Binding(
+                                get: { setting.neuralModel },
+                                set: { newValue in
+                                    var updated = setting
+                                    updated.neuralModel = newValue
+                                    store.setEnhancement(updated, jobID: job.id)
+                                }
+                            )) {
+                                ForEach(NeuralUpscalerModel.allCases, id: \.self) { model in
+                                    Text(model.shortName).tag(model)
+                                }
+                            }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+
+                        Picker("强度", selection: Binding(
+                            get: { setting.strength },
+                            set: { newValue in
+                                var updated = setting
+                                updated.strength = newValue
+                                store.setEnhancement(updated, jobID: job.id)
+                            }
+                        )) {
+                            ForEach(EnhancementStrength.allCases, id: \.self) { strength in
+                                Text(strength.displayName).tag(strength)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        Spacer(minLength: 0)
+                    }
+
+                    Text("输出 \(targetDimensions(job).map { "\(Int($0.width))×\(Int($0.height))" } ?? "源 ×2")；\(setting.speedHint)")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    if setting.isNeural, let video = job.mediaInfo?.video,
+                       max(video.displayWidth, video.displayHeight) >= 3840 {
+                        Text("4K→8K 超分很慢（快速档约 0.03–0.04x 实时），请留意预计耗时。")
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.warning)
+                    }
+                }
+            } else if let setting = job.enhancement {
+                InspectorRow(label: "模式", value: setting.summary)
+                InspectorRow(label: "管线", value: setting.pipelineDescription)
+            } else {
+                InspectorRow(label: "画质修复", value: "关闭")
+            }
+        }
     }
 
     // MARK: 硬件

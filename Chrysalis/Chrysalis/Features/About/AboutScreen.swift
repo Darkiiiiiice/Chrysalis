@@ -44,6 +44,8 @@ struct AboutScreen: View {
                 Text("© 2026 蝉蜕 Chrysalis")
                 Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
                     .multilineTextAlignment(.center)
+                Text("画质修复模型：Real-ESRGAN（realesr-general-x4v3 / RealESRGANv2-animevideo-xsx2），BSD-3 License。")
+                    .multilineTextAlignment(.center)
             }
             .font(Theme.TextStyle.label)
             .foregroundStyle(Theme.textSecondary)
