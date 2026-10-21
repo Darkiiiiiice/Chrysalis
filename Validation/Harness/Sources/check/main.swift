@@ -34,16 +34,25 @@ func run() async throws {
         let unitSummary = (harness.passed, harness.failed, harness.skipped)
         harness.reset()
         await runIntegrationTests()
-        harness.summary(label: "集成测试")
+        let integrationSummary = (harness.passed, harness.failed, harness.skipped)
+        harness.reset()
+        await runSubtitleTests()
+        harness.summary(label: "字幕（P8 解析 / 质检 / 修复）")
         print("")
+        print("—— 集成测试：\(integrationSummary.0) 过 / \(integrationSummary.1) 败 / \(integrationSummary.2) 跳 ——")
         print("—— 单元测试：\(unitSummary.0) 过 / \(unitSummary.1) 败 / \(unitSummary.2) 跳 ——")
-        if unitSummary.1 > 0 || harness.failed > 0 { exit(1) }
+        if unitSummary.1 > 0 || integrationSummary.1 > 0 || harness.failed > 0 { exit(1) }
 
     case "unit":
         try Artifacts.prepare()
         await runUnitTests()
-        harness.summary(label: "单元测试")
-        if harness.exitCode != 0 { exit(1) }
+        let unitSummary = (harness.passed, harness.failed, harness.skipped)
+        harness.reset()
+        await runSubtitleTests()
+        harness.summary(label: "字幕（P8 解析 / 质检 / 修复）")
+        print("")
+        print("—— 单元测试：\(unitSummary.0) 过 / \(unitSummary.1) 败 / \(unitSummary.2) 跳 ——")
+        if unitSummary.1 > 0 || harness.failed > 0 { exit(1) }
 
     case "integration":
         try Artifacts.prepare()
