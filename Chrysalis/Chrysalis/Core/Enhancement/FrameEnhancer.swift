@@ -85,6 +85,11 @@ final class FilterUpscaler: FrameEnhancer, @unchecked Sendable {
 // MARK: - 共享工具
 
 enum EnhancementSupport {
+    /// 单调时钟（秒）——诊断计时用（ENH_TIMING=1 时输出分段耗时）。
+    static func now() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
+    }
+
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
 
     /// 新建 BGRA 输出帧缓冲（IOSurface + Metal 兼容；写入端直接可编码）。

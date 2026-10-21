@@ -8,10 +8,15 @@ import Foundation
 
 /// Core ML 神经超分：模型懒加载（ANE 优先）+ tile 切分羽化合成 + 强度后处理。
 ///
-/// 串行约定：由引擎帧泵单任务调用，内部缓冲（work / tile / scratch）按此复用。
+/// 串行约定：由引擎帧泵单任务调用，内部缓冲（work / tile）按此复用；tile 合成走 Core Image（GPU）。
 final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
     let outputWidth: Int
     let outputHeight: Int
+
+    /// 验收/诊断用：模型输入 tile 尺寸与 MLModel 实例。
+    var debugTileWidth: Int { tileWidth }
+    var debugTileHeight: Int { tileHeight }
+    var debugModel: MLModel { model }
 
     private let model: MLModel
     private let context = CIContext(options: [.cacheIntermediates: false])
@@ -33,7 +38,6 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
     // 串行复用缓冲
     private var workBuffer: CVPixelBuffer?
     private var tileBuffer: CVPixelBuffer?
-    private var scratchBuffer: CVPixelBuffer?
     private var xOrigins: [(offset: Int, overlapWithPrevious: Int)] = []
     private var yOrigins: [(offset: Int, overlapWithPrevious: Int)] = []
 
@@ -131,8 +135,14 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
     // MARK: 模型资源与 IO
 
     private static func modelURL(named resourceName: String) -> URL? {
-        Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc")
-            ?? Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc", subdirectory: "Models")
+        if let url = Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc") { return url }
+        if let url = Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc", subdirectory: "Models") { return url }
+        // 无 bundle 可执行（harness）：模型直接放在可执行文件旁边
+        if let directory = Bundle.main.executableURL?.deletingLastPathComponent() {
+            let candidate = directory.appendingPathComponent("\(resourceName).mlmodelc", isDirectory: true)
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
     }
 
     /// 模型 IO 约定（§7.6）：输入 `frame` / 输出 `out`，BGRA，输出为输入的整数倍。
@@ -232,9 +242,18 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
             )
         }
         // 工作帧：快速档先把源降到 0.5x（再交给 4x 模型）
+        let debugTiming = ProcessInfo.processInfo.environment["ENH_TIMING"] == "1"
+        var mark = EnhancementSupport.now()
         let work = try prepareWorkBuffer(from: input)
-        let scratch = try acquireScratchBuffer()
         let tile = try acquireTileBuffer()
+        if debugTiming { print(String(format: "    [timing] prepare %.0f ms", (EnhancementSupport.now() - mark) * 1000)) }
+        mark = EnhancementSupport.now()
+
+        // 逐 tile 推理，输出在 Core Image（GPU）里羽化合成——
+        // 不对 ANE 输出/4K 画布做任何 CPU 锁（P7.4 实测：CPU 锁 IOSurface 会触发隐式同步风暴，
+        // 每 tile 额外 200–700ms；GPU 合成后 tiles 阶段 ≈ 纯推理耗时）
+        let outputRect = CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight)
+        var composed: CIImage?
         for (row, y) in yOrigins.enumerated() {
             for (column, x) in xOrigins.enumerated() {
                 try copyTile(from: work, x: x.offset, y: y.offset, into: tile)
@@ -245,23 +264,68 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
                 guard let tileOutput = result.featureValue(for: "out")?.imageBufferValue else {
                     throw TranscodeEngineError.enhancementUnavailable("模型输出缺少 out 图像")
                 }
-                try composite(
-                    tile: tileOutput,
-                    into: scratch,
-                    x: x.offset * scale,
-                    y: y.offset * scale,
-                    overlapX: column > 0 ? x.overlapWithPrevious : 0,
-                    overlapY: row > 0 ? y.overlapWithPrevious : 0
-                )
+                let visibleWidth = min(tileWidth * scale, outputWidth - x.offset * scale)
+                let visibleHeight = min(tileHeight * scale, outputHeight - y.offset * scale)
+                let tileImage = CIImage(cvPixelBuffer: tileOutput)
+                    .cropped(to: CGRect(x: 0, y: 0, width: visibleWidth, height: visibleHeight))
+                    .transformed(by: CGAffineTransform(
+                        translationX: CGFloat(x.offset * scale), y: CGFloat(y.offset * scale)
+                    ))
+                let overlapXpx = column > 0 ? x.overlapWithPrevious * scale : 0
+                let overlapYpx = row > 0 ? y.overlapWithPrevious * scale : 0
+                guard let previous = composed else {
+                    composed = tileImage
+                    continue
+                }
+                if overlapXpx <= 0, overlapYpx <= 0 {
+                    composed = tileImage.composited(over: previous)
+                    continue
+                }
+                // 羽化 mask：左/上重叠区线性渐变（min 组合 X 与 Y 两个方向）
+                var mask = CIImage(color: CIColor.white).cropped(to: outputRect)
+                if overlapXpx > 0 {
+                    let gradient = CIFilter.linearGradient()
+                    gradient.point0 = CGPoint(x: CGFloat(x.offset * scale), y: 0)
+                    gradient.point1 = CGPoint(x: CGFloat(x.offset * scale + overlapXpx), y: 0)
+                    gradient.color0 = CIColor.black
+                    gradient.color1 = CIColor.white
+                    if let ramp = gradient.outputImage {
+                        mask = ramp.cropped(to: outputRect).applyingFilter("CIMinimumCompositing", parameters: [
+                            kCIInputBackgroundImageKey: mask,
+                            kCIInputImageKey: ramp,
+                        ])
+                    }
+                }
+                if overlapYpx > 0 {
+                    let gradient = CIFilter.linearGradient()
+                    gradient.point0 = CGPoint(x: 0, y: CGFloat(y.offset * scale))
+                    gradient.point1 = CGPoint(x: 0, y: CGFloat(y.offset * scale + overlapYpx))
+                    gradient.color0 = CIColor.black
+                    gradient.color1 = CIColor.white
+                    if let ramp = gradient.outputImage {
+                        mask = ramp.cropped(to: outputRect).applyingFilter("CIMinimumCompositing", parameters: [
+                            kCIInputBackgroundImageKey: mask,
+                            kCIInputImageKey: ramp,
+                        ])
+                    }
+                }
+                composed = tileImage.applyingFilter("CIBlendWithMask", parameters: [
+                    kCIInputBackgroundImageKey: previous,
+                    "inputMaskImage": mask,
+                ])
             }
+        }
+        guard let modelImage = composed else {
+            throw TranscodeEngineError.enhancementUnavailable("没有任何 tile 输出")
+        }
+        if debugTiming {
+            print(String(format: "    [timing] tiles×%d %.0f ms", xOrigins.count * yOrigins.count, (EnhancementSupport.now() - mark) * 1000))
+            mark = EnhancementSupport.now()
         }
 
         // 输出帧（每帧独立，写入端持有）：模型输出 + 强度后处理。
         // 参考图（light 档）在此构造成 CIImage，切断与借用输入 buffer 的 region 关联。
         let output = try EnhancementSupport.makeBuffer(width: outputWidth, height: outputHeight)
-        let modelImage = CIImage(cvPixelBuffer: scratch).cropped(
-            to: CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight)
-        )
         let reference: CIImage?
         if strength == .light {
             reference = CIImage(cvPixelBuffer: input)
@@ -274,6 +338,7 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
             reference = nil
         }
         try renderOutput(modelImage: modelImage, reference: reference, into: output)
+        if debugTiming { print(String(format: "    [timing] post %.0f ms", (EnhancementSupport.now() - mark) * 1000)) }
         return CVReadOnlyPixelBuffer(unsafeBuffer: output)
     }
 
@@ -306,14 +371,6 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
         let buffer = try EnhancementSupport.makeBuffer(width: workWidth, height: workHeight)
         workBuffer = buffer
         return try prepareWorkBuffer(from: input)
-    }
-
-    /// 工作帧坐标系的 scratch（tile 合成目标），跨帧复用；输出帧另行新建。
-    private func acquireScratchBuffer() throws -> CVPixelBuffer {
-        if let scratchBuffer { return scratchBuffer }
-        let buffer = try EnhancementSupport.makeBuffer(width: outputWidth, height: outputHeight)
-        scratchBuffer = buffer
-        return buffer
     }
 
     // MARK: 后处理（强度三档，§7.6）
@@ -357,7 +414,7 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
 
     // MARK: tile 拷贝与羽化合成（P7.1 spike 移植；支持源小于 tile 的边缘复制 pad）
 
-    /// 从工作帧拷贝 tile；源越界区域复制边缘像素（pad）。
+    /// 从工作帧拷贝 tile；行内优先整段 memcpy，源越界区域才逐像素复制边缘（pad）。
     private func copyTile(from source: CVPixelBuffer, x: Int, y: Int, into destination: CVPixelBuffer) throws {
         let sourceWidth = CVPixelBufferGetWidth(source)
         let sourceHeight = CVPixelBufferGetHeight(source)
@@ -374,93 +431,36 @@ final class NeuralUpscaler: FrameEnhancer, @unchecked Sendable {
         }
         let sourceStride = CVPixelBufferGetBytesPerRow(source)
         let destinationStride = CVPixelBufferGetBytesPerRow(destination)
+        let tileWidth = CVPixelBufferGetWidth(destination)
 
-        for row in 0..<tileHeight {
+        for row in 0..<CVPixelBufferGetHeight(destination) {
             let sourceY = min(max(y + row, 0), sourceHeight - 1)
             let sourceRow = sourceBase + sourceY * sourceStride
             let destinationRow = destinationBase + row * destinationStride
-            for column in 0..<tileWidth {
-                let sourceX = min(max(x + column, 0), sourceWidth - 1)
+
+            // 行内源内区间：整段拷贝；左右越界（pad）才逐像素复制源边缘列
+            let left = max(x, 0)
+            let right = min(x + tileWidth, sourceWidth)
+            if left < right {
                 memcpy(
-                    destinationRow + column * 4,
-                    sourceRow + sourceX * 4,
-                    4
+                    destinationRow + (left - x) * 4,
+                    sourceRow + left * 4,
+                    (right - left) * 4
                 )
             }
-        }
-    }
-
-    /// tile 输出按羽化 alpha 叠加进输出帧（左/上重叠区渐变，其余覆盖；目标越界裁剪）。
-    private func composite(
-        tile: CVPixelBuffer,
-        into output: CVPixelBuffer,
-        x: Int,
-        y: Int,
-        overlapX: Int,
-        overlapY: Int
-    ) throws {
-        let tileWidth = CVPixelBufferGetWidth(tile)
-        let tileHeight = CVPixelBufferGetHeight(tile)
-        let outputWidth = CVPixelBufferGetWidth(output)
-        let outputHeight = CVPixelBufferGetHeight(output)
-        let visibleWidth = min(tileWidth, outputWidth - x)
-        let visibleHeight = min(tileHeight, outputHeight - y)
-        guard visibleWidth > 0, visibleHeight > 0 else { return }
-
-        let rampX = min(overlapX * scale, tileWidth)
-        var alphaX = [UInt16](repeating: 255, count: visibleWidth)
-        for index in 0..<min(rampX, visibleWidth) {
-            alphaX[index] = UInt16((Double(index) + 0.5) / Double(rampX) * 255.0)
-        }
-        let rampY = min(overlapY * scale, tileHeight)
-        var alphaY = [UInt16](repeating: 255, count: visibleHeight)
-        for index in 0..<min(rampY, visibleHeight) {
-            alphaY[index] = UInt16((Double(index) + 0.5) / Double(rampY) * 255.0)
-        }
-
-        CVPixelBufferLockBaseAddress(tile, .readOnly)
-        CVPixelBufferLockBaseAddress(output, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(output, [])
-            CVPixelBufferUnlockBaseAddress(tile, .readOnly)
-        }
-        guard let tileBase = CVPixelBufferGetBaseAddress(tile),
-              let outputBase = CVPixelBufferGetBaseAddress(output) else {
-            throw TranscodeEngineError.enhancementUnavailable("像素缓冲区没有基地址")
-        }
-        let tileStride = CVPixelBufferGetBytesPerRow(tile)
-        let outputStride = CVPixelBufferGetBytesPerRow(output)
-
-        alphaX.withUnsafeBufferPointer { alphaXBuffer in
-            alphaY.withUnsafeBufferPointer { alphaYBuffer in
-                for row in 0..<visibleHeight {
-                    let sourceRow = tileBase + row * tileStride
-                    let destinationRow = outputBase + (y + row) * outputStride + x * 4
-                    let alphaYValue = Int(alphaYBuffer[row])
-                    if alphaYValue == 255 && rampX == 0 {
-                        memcpy(destinationRow, sourceRow, visibleWidth * 4)
-                        continue
-                    }
-                    let source = sourceRow.assumingMemoryBound(to: UInt8.self)
-                    let destination = destinationRow.assumingMemoryBound(to: UInt8.self)
-                    for column in 0..<visibleWidth {
-                        let alpha = Int(alphaXBuffer[column]) * alphaYValue / 255
-                        if alpha >= 255 {
-                            for channel in 0..<3 {
-                                destination[column * 4 + channel] = source[column * 4 + channel]
-                            }
-                        } else if alpha > 0 {
-                            let inverse = 255 - alpha
-                            for channel in 0..<3 {
-                                destination[column * 4 + channel] = UInt8((
-                                    Int(source[column * 4 + channel]) * alpha
-                                        + Int(destination[column * 4 + channel]) * inverse + 127
-                                ) / 255)
-                            }
-                        }
-                    }
+            if x < 0 {
+                // 左侧 pad：复制源第一列（clamp 后最近的有效列）
+                for column in 0..<(-x) {
+                    memcpy(destinationRow + column * 4, sourceRow, 4)
+                }
+            }
+            if x + tileWidth > sourceWidth {
+                let edge = sourceRow + (sourceWidth - 1) * 4
+                for column in (sourceWidth - x)..<tileWidth {
+                    memcpy(destinationRow + column * 4, edge, 4)
                 }
             }
         }
     }
+
 }

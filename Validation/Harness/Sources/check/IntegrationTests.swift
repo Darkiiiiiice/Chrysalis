@@ -469,6 +469,9 @@ func runIntegrationTests() async {
             }
         }
     }
+
+    // P7.4 画质修复验收（单帧 / tile 接缝 / 端到端 / 吞吐；设计文档 §7.6）
+    await runEnhancementAcceptance()
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。
