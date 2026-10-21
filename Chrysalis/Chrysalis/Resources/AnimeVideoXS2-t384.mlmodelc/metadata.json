@@ -1,0 +1,85 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "shortDescription" : "Real-ESRGAN SRVGGNetCompact 2x upscaler, fixed 384x384 tile",
+    "outputSchema" : [
+      {
+        "height" : "768",
+        "colorspace" : "RGB",
+        "isOptional" : "0",
+        "width" : "768",
+        "isColor" : "1",
+        "formattedType" : "Image (Color 768 × 768)",
+        "hasSizeFlexibility" : "0",
+        "type" : "Image",
+        "shortDescription" : "",
+        "name" : "out"
+      }
+    ],
+    "storagePrecision" : "Mixed (Float16, Float32)",
+    "modelParameters" : [
+
+    ],
+    "author" : "Xintao Wang et al. \/ Real-ESRGAN contributors",
+    "specificationVersion" : 9,
+    "license" : "BSD-3-Clause",
+    "mlProgramOperationTypeHistogram" : {
+      "Ios18.mul" : 2,
+      "PixelShuffle" : 1,
+      "Ios18.clip" : 1,
+      "Ios18.prelu" : 17,
+      "Ios18.cast" : 2,
+      "Ios18.conv" : 18,
+      "UpsampleNearestNeighbor" : 1,
+      "Ios18.add" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32)",
+    "stateSchema" : [
+
+    ],
+    "isUpdatable" : "0",
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "inputSchema" : [
+      {
+        "height" : "384",
+        "colorspace" : "RGB",
+        "isOptional" : "0",
+        "width" : "384",
+        "isColor" : "1",
+        "formattedType" : "Image (Color 384 × 384)",
+        "hasSizeFlexibility" : "0",
+        "type" : "Image",
+        "shortDescription" : "",
+        "name" : "frame"
+      }
+    ],
+    "userDefinedMetadata" : {
+      "scale" : "2",
+      "weights_file" : "RealESRGANv2-animevideo-xsx2.pth",
+      "weights_sha256" : "27985aa2198711ecd72f9bb274ec7b164e018fc9ce2933daaa7c7ab36a2bd3fe",
+      "com.github.apple.coremltools.version" : "9.0",
+      "tile" : "384",
+      "source" : "https:\/\/github.com\/xinntao\/Real-ESRGAN",
+      "com.github.apple.coremltools.conversion_date" : "2026-10-21",
+      "io" : "image RGB 0-255 in \/ image RGB 0-255 out",
+      "architecture" : "SRVGGNetCompact",
+      "precision" : "fp16",
+      "conversion_script" : "Validation\/Models\/convert_realesrgan.py",
+      "com.github.apple.coremltools.source_dialect" : "TorchScript",
+      "com.github.apple.coremltools.source" : "torch==2.14.1",
+      "info" : "{\"act_type\": \"prelu\", \"arch\": \"SRVGGNetCompact\", \"num_conv\": 16, \"num_feat\": 64}"
+    },
+    "generatedClassName" : "AnimeVideoXS2_t384",
+    "method" : "predict"
+  }
+]

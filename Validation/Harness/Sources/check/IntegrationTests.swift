@@ -412,6 +412,63 @@ func runIntegrationTests() async {
             }
         }
     }
+
+    await h.suite("集成：画质修复（P7.2 冒烟，§7.6）") {
+        // 分辨率锁定：开启增强但选了缩放档位 → 明确失败
+        await h.runAsync("增强 + 非保持源 → enhancementResolutionConflict") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-enh-lock.mp4"), codec: .h264, container: .mp4)
+            request.resolution = .r720
+            request.enhancement = EnhancementSetting.defaultNeural
+            try await Harness.expectError(TranscodeEngineError.enhancementResolutionConflict) {
+                _ = try await run(request)
+            }
+        }
+        // 滤镜链端到端：360p → 2x = 720p 输出（GPU 路径，快）
+        await h.runAsync("滤镜链端到端：360p → 2x 输出 720p") {
+            try requireHardwareEncoder()
+            let smallSource = try await sourceClip("源-360p.mp4") { url in
+                ClipFactory.Spec(url: url, size: CGSize(width: 640, height: 360), codec: .h264, bitrate: 1_500_000)
+            }
+            var request = makeRequest(input: smallSource, output: outputs.appendingPathComponent("out-enhance-filter.mp4"), codec: .h264, container: .mp4)
+            request.enhancement = EnhancementSetting.defaultFilter
+            let outcome = try await run(request)
+            try expect(FileManager.default.fileExists(atPath: outcome.outputURL.path), "输出存在")
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expectEqual(info.video?.displayWidth, 1280, "输出宽 = 源 ×2")
+            try expectEqual(info.video?.displayHeight, 720, "输出高 = 源 ×2")
+            try assertNoTempFiles(in: outputs)
+        }
+        // 神经模式：模型在 harness 包内不存在 → 明确失败不静默回退；
+        // 若未来把模型放进 harness 包，则退化为真实端到端断言（两档通用）。
+        await h.runAsync("神经模式：模型缺失明确失败 / 有模型则端到端") {
+            try requireHardwareEncoder()
+            let smallSource = try await sourceClip("源-360p.mp4") { url in
+                ClipFactory.Spec(url: url, size: CGSize(width: 640, height: 360), codec: .h264, bitrate: 1_500_000)
+            }
+            var request = makeRequest(input: smallSource, output: outputs.appendingPathComponent("out-enhance-neural.mp4"), codec: .h264, container: .mp4)
+            request.enhancement = EnhancementSetting.defaultNeural
+            let modelAvailable = Bundle.main.url(
+                forResource: NeuralUpscalerModel.fast.resourceName, withExtension: "mlmodelc"
+            ) != nil
+            if modelAvailable {
+                let outcome = try await run(request)
+                let info = try await OutputProbe.info(of: outcome.outputURL)
+                try expectEqual(info.video?.displayWidth, 1280, "神经超分输出宽 ×2")
+                try expectEqual(info.video?.displayHeight, 720, "神经超分输出高 ×2")
+            } else {
+                do {
+                    _ = try await run(request)
+                    throw TestFailure(message: "模型缺失时应失败", file: #filePath, line: #line)
+                } catch let error as TranscodeEngineError {
+                    guard case .enhancementUnavailable = error else {
+                        throw TestFailure(message: "应为 enhancementUnavailable：\(error)", file: #filePath, line: #line)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

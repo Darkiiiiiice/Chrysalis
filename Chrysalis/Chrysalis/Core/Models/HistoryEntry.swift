@@ -42,6 +42,9 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
     var mediaKind: MediaKind
     var movieMetadata: MovieMetadata?
 
+    /// 画质修复快照（设计文档 §7.6）；旧历史记录没有该字段，缺省即关闭。
+    var enhancement: EnhancementSetting?
+
     var isMovie: Bool { mediaKind == .movie }
 
     /// 元数据展示：已确认快照 / 「手动」来源标注。

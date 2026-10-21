@@ -39,6 +39,10 @@ struct TranscodeRequest: Sendable {
     var metadata: MovieMetadata?
     /// 海报数据（本地缓存取得；nil 表示跳过海报，不阻塞转码）。
     var posterData: Data?
+    /// 画质修复（设计文档 §7.6）；nil 表示关闭。
+    ///
+    /// 开启时引擎锁定源分辨率，输出尺寸 = 源显示尺寸 ×2。
+    var enhancement: EnhancementSetting? = nil
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。
@@ -77,6 +81,12 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
     case readerSetupFailed(String)
     case writerSetupFailed(String)
     case readWriteFailed(String)
+    /// 画质修复模型缺失、损坏或形状不符（不回退滤镜链）。
+    case enhancementUnavailable(String)
+    /// 画质修复分辨率与「保持源」锁定冲突。
+    case enhancementResolutionConflict
+    /// 目标编码器不支持 8K 输出（不静默降级）。
+    case eightKUnsupported(codec: String, width: Int, height: Int)
     case failed(String)
 
     var errorDescription: String? {
@@ -107,6 +117,12 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
             "写入端初始化失败：\(message)"
         case .readWriteFailed(let message):
             "转码过程中出错：\(message)"
+        case .enhancementUnavailable(let message):
+            "画质修复不可用：\(message)"
+        case .enhancementResolutionConflict:
+            "画质修复开启时输出固定为源尺寸 ×2；请把分辨率档位切回「保持源」。"
+        case .eightKUnsupported(let codec, let width, let height):
+            "当前 \(codec) 硬件编码器不支持 \(width)×\(height)（8K）输出：请改用 4K 源或关闭画质修复；不会静默降到 4K。"
         case .failed(let message):
             message
         }

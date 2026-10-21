@@ -1,0 +1,85 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "shortDescription" : "Real-ESRGAN SRVGGNetCompact 4x upscaler, fixed 352x288 tile",
+    "outputSchema" : [
+      {
+        "height" : "1152",
+        "colorspace" : "RGB",
+        "isOptional" : "0",
+        "width" : "1408",
+        "isColor" : "1",
+        "formattedType" : "Image (Color 1408 × 1152)",
+        "hasSizeFlexibility" : "0",
+        "type" : "Image",
+        "shortDescription" : "",
+        "name" : "out"
+      }
+    ],
+    "storagePrecision" : "Mixed (Float16, Float32)",
+    "modelParameters" : [
+
+    ],
+    "author" : "Xintao Wang et al. \/ Real-ESRGAN contributors",
+    "specificationVersion" : 9,
+    "license" : "BSD-3-Clause",
+    "mlProgramOperationTypeHistogram" : {
+      "Ios18.mul" : 2,
+      "PixelShuffle" : 1,
+      "Ios18.clip" : 1,
+      "Ios18.prelu" : 33,
+      "Ios18.cast" : 2,
+      "Ios18.conv" : 34,
+      "UpsampleNearestNeighbor" : 1,
+      "Ios18.add" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32)",
+    "stateSchema" : [
+
+    ],
+    "isUpdatable" : "0",
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "inputSchema" : [
+      {
+        "height" : "288",
+        "colorspace" : "RGB",
+        "isOptional" : "0",
+        "width" : "352",
+        "isColor" : "1",
+        "formattedType" : "Image (Color 352 × 288)",
+        "hasSizeFlexibility" : "0",
+        "type" : "Image",
+        "shortDescription" : "",
+        "name" : "frame"
+      }
+    ],
+    "userDefinedMetadata" : {
+      "scale" : "4",
+      "weights_file" : "realesr-general-x4v3.pth",
+      "weights_sha256" : "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+      "com.github.apple.coremltools.version" : "9.0",
+      "tile" : "352x288",
+      "source" : "https:\/\/github.com\/xinntao\/Real-ESRGAN",
+      "io" : "image RGB 0-255 in \/ image RGB 0-255 out",
+      "com.github.apple.coremltools.conversion_date" : "2026-10-21",
+      "architecture" : "SRVGGNetCompact",
+      "precision" : "fp16",
+      "conversion_script" : "Validation\/Models\/convert_realesrgan.py",
+      "com.github.apple.coremltools.source_dialect" : "TorchScript",
+      "com.github.apple.coremltools.source" : "torch==2.14.1",
+      "info" : "{\"act_type\": \"prelu\", \"arch\": \"SRVGGNetCompact\", \"num_conv\": 32, \"num_feat\": 64}"
+    },
+    "generatedClassName" : "GeneralX4v3_t352x288",
+    "method" : "predict"
+  }
+]

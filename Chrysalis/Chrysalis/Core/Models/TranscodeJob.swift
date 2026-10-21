@@ -58,6 +58,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var metadataState: MovieMetadataState = .none
     /// 已确认的电影元数据快照（转码时写入容器）。
     var movieMetadata: MovieMetadata?
+    /// 任务级画质修复（设计文档 §7.6）；nil 表示关闭。
+    var enhancement: EnhancementSetting?
 
     init(id: UUID = UUID(), inputURL: URL, preset: TranscodePreset = .defaultPreset) {
         self.id = id
@@ -66,6 +68,7 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
         self.state = .queued
         self.verificationIssues = []
         self.notes = []
+        self.enhancement = nil
     }
 
     var displayName: String { inputURL.lastPathComponent }

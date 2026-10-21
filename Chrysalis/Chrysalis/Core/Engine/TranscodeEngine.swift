@@ -156,15 +156,26 @@ actor TranscodeEngine {
         // 旋转 / 偶数对齐 / 缩放 / 帧率任一需要改变时走合成慢路径。
         let oriented = VideoGeometry.orientedSize(naturalSize: naturalSize, preferredTransform: preferredTransform)
         let sourceSize = VideoGeometry.evenSize(oriented)
-        let renderSize = request.resolution.renderSize(
-            sourceWidth: Int(oriented.width.rounded()),
-            sourceHeight: Int(oriented.height.rounded())
-        ) ?? sourceSize
+        // 画质修复（设计文档 §7.6）：输出固定为源显示尺寸 ×2；分辨率档位必须为「保持源」
+        if request.enhancement != nil, request.resolution != .source {
+            throw TranscodeEngineError.enhancementResolutionConflict
+        }
+        let renderSize: CGSize
+        if request.enhancement != nil {
+            renderSize = CGSize(width: sourceSize.width * 2, height: sourceSize.height * 2)
+        } else {
+            renderSize = request.resolution.renderSize(
+                sourceWidth: Int(oriented.width.rounded()),
+                sourceHeight: Int(oriented.height.rounded())
+            ) ?? sourceSize
+        }
+        // 合成慢路径只负责几何（旋转/偶数对齐/几何缩放），不做画质修复的 2x——那是增强层的职责
+        let geometrySize = request.enhancement != nil ? sourceSize : renderSize
         let outputFPS = request.frameRate.effectiveFrameRate(sourceFPS: mediaFPS)
         var compositionReasons: [String] = []
         if preferredTransform != .identity { compositionReasons.append("旋转") }
         if oriented != sourceSize { compositionReasons.append("偶数对齐") }
-        if renderSize != sourceSize { compositionReasons.append("缩放") }
+        if geometrySize != sourceSize { compositionReasons.append("缩放") }
         if abs(outputFPS - mediaFPS) > 0.01 { compositionReasons.append("帧率") }
         let needsComposition = !compositionReasons.isEmpty
 
@@ -179,6 +190,10 @@ actor TranscodeEngine {
         }
 
         let videoOutput: AVAssetReaderOutput
+        // 画质修复路径读 BGRA（模型/滤镜直接消费；写入端编码时由 AVFoundation 自动转回 YUV）
+        let readerPixelFormat: OSType = request.enhancement != nil
+            ? kCVPixelFormatType_32BGRA
+            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         if needsComposition {
             // macOS 26 起 AVMutable* 系列弃用，改用 Configuration 值类型（部署目标 27.0）
             var layerConfiguration = AVVideoCompositionLayerInstruction.Configuration(trackID: videoTrack.trackID)
@@ -186,7 +201,7 @@ actor TranscodeEngine {
                 VideoGeometry.fitTransform(
                     naturalSize: naturalSize,
                     preferredTransform: preferredTransform,
-                    renderSize: renderSize,
+                    renderSize: geometrySize,
                     allowUpscale: false
                 ),
                 at: .zero
@@ -201,7 +216,7 @@ actor TranscodeEngine {
             )
             let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)
             var compositionConfiguration = AVVideoComposition.Configuration()
-            compositionConfiguration.renderSize = renderSize
+            compositionConfiguration.renderSize = geometrySize
             compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(outputFPS.rounded(), 1)))
             compositionConfiguration.instructions = [instruction]
             let composition = AVVideoComposition(configuration: compositionConfiguration)
@@ -209,7 +224,7 @@ actor TranscodeEngine {
             let output = AVAssetReaderVideoCompositionOutput(
                 videoTracks: [videoTrack],
                 videoSettings: [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                    kCVPixelBufferPixelFormatTypeKey as String: readerPixelFormat,
                 ]
             )
             output.videoComposition = composition
@@ -219,7 +234,7 @@ actor TranscodeEngine {
             videoOutput = AVAssetReaderTrackOutput(
                 track: videoTrack,
                 outputSettings: [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                    kCVPixelBufferPixelFormatTypeKey as String: readerPixelFormat,
                 ]
             )
         }
@@ -353,6 +368,20 @@ actor TranscodeEngine {
         }
         try checkDiskSpace(directory: outputDirectory, requiredBytes: requiredBytes + 200 * 1_048_576)
 
+        // MARK: 画质修复执行器（设计文档 §7.6：模型懒加载；失败即 preparing 失败，不静默回退滤镜链）
+        let enhancer: FrameEnhancer?
+        if let setting = request.enhancement {
+            let made = try await FrameEnhancerFactory.make(
+                setting: setting,
+                sourceWidth: Int(sourceSize.width),
+                sourceHeight: Int(sourceSize.height)
+            )
+            enhancer = made
+            notes.append(contentsOf: made.notes)
+        } else {
+            enhancer = nil
+        }
+
         // MARK: 写入端
         let tempURL = OutputPlanner.makeTempURL(in: outputDirectory)
         let writer: AVAssetWriter
@@ -372,6 +401,14 @@ actor TranscodeEngine {
             )
         )
         guard writer.canAdd(videoInput) else {
+            // 8K 超分：明确失败，不静默降级（设计文档 §7.6 / 2026-10-21 拍板）
+            if request.enhancement != nil, max(Int(renderSize.width), Int(renderSize.height)) >= 7680 {
+                throw TranscodeEngineError.eightKUnsupported(
+                    codec: request.videoCodec.displayName,
+                    width: Int(renderSize.width),
+                    height: Int(renderSize.height)
+                )
+            }
             throw TranscodeEngineError.writerSetupFailed("无法添加视频写入器（可能是硬件编码器不可用）")
         }
 
@@ -483,8 +520,26 @@ actor TranscodeEngine {
                         }
                         guard let ready else { break }
                         if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
+                        // 画质修复层（设计文档 §7.6）：源帧 → 2x 帧；时间戳与音频直通不变
+                        var outgoing = ready
+                        if let enhancer {
+                            guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(ready) else {
+                                throw TranscodeEngineError.readWriteFailed("视频帧不是像素内容，无法增强")
+                            }
+                            outgoing = try readOnly.content.withUnsafeBuffer { inputBuffer in
+                                let enhanced = try enhancer.enhance(inputBuffer)
+                                let format = CMVideoFormatDescription(pixelBuffer: enhanced)
+                                let frame = CMReadySampleBuffer(
+                                    pixelBuffer: enhanced,
+                                    formatDescription: format,
+                                    presentationTimeStamp: ready.presentationTimeStamp,
+                                    duration: ready.duration
+                                )
+                                return CMReadySampleBuffer(frame)
+                            }
+                        }
                         do {
-                            try await videoReceiver.append(ready)
+                            try await videoReceiver.append(outgoing)
                         } catch {
                             throw TranscodeEngineError.readWriteFailed("视频写入失败：\(errorText(error))")
                         }
