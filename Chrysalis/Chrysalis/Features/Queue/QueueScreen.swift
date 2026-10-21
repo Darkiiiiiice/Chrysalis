@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 /// 主界面：两栏 NavigationSplitView + 可隐藏检查器（设计文档 §8.3）。
 struct QueueScreen: View {
     @Environment(QueueStore.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         @Bindable var store = store
@@ -53,6 +54,28 @@ struct QueueScreen: View {
         }
         .navigationTitle("Chrysalis")
         .background(Theme.bg)
+        .overlay(alignment: .bottom) {
+            // 底部居中 Toast（设计文档 §8.4）：4 秒自动消失，带一个次级动作。
+            if let toast = store.toast {
+                ToastView(toast: toast) { action in
+                    store.dismissToast()
+                    switch action {
+                    case .none: break
+                    case .revealOutputFolder: store.openOutputFolderInFinder()
+                    }
+                } onDismiss: {
+                    store.dismissToast()
+                }
+                .padding(.bottom, Theme.Spacing.s3 + Theme.Spacing.s2)
+                .transition(toastTransition)
+            }
+        }
+        .animation(Theme.Motion.toast, value: store.toast?.id)
+    }
+
+    /// Reduce Motion 时只淡入淡出，不做位移（设计文档 §8.5）。
+    private var toastTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
     }
 
     @ViewBuilder

@@ -70,5 +70,16 @@ enum Theme {
         static let selection = Animation.easeOut(duration: 0.18)
         static let inspector = Animation.easeOut(duration: 0.22)
         static let toast = Animation.easeOut(duration: 0.30)
+
+        /// Reduce Motion 降级：返回 `nil` 表示不做该动画（SwiftUI 跳过）。
+        /// §8.5「尊重减少动态效果」：关闭呼吸与位移，保留纯透明度过渡。
+        static func resolved(_ animation: Animation, isReduced: Bool) -> Animation? {
+            isReduced ? nil : animation
+        }
+    }
+
+    // MARK: 阴影（只给检查器与 Toast：0 8 24 rgba(0,0,0,0.35)，设计文档 §8.2）
+    enum Shadow {
+        static let elevated = Color.black.opacity(0.35)
     }
 }

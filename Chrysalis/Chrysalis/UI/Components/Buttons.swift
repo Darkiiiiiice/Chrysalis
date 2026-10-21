@@ -8,6 +8,7 @@ struct PrimaryButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -26,7 +27,7 @@ struct PrimaryButton: View {
             .brightness(isHovered ? 0.06 : 0)
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
         }
-        .buttonStyle(PressScaleButtonStyle())
+        .buttonStyle(PressScaleButtonStyle(isReducedMotion: reduceMotion))
         .onHover { isHovered = $0 }
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.4)
@@ -43,6 +44,7 @@ struct IconButton: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         systemImage: String,
@@ -70,7 +72,7 @@ struct IconButton: View {
                 )
                 .contentShape(Rectangle())
         }
-        .buttonStyle(PressScaleButtonStyle())
+        .buttonStyle(PressScaleButtonStyle(isReducedMotion: reduceMotion))
         .onHover { isHovered = $0 }
         .help(help)
         .accessibilityLabel(help)
@@ -110,10 +112,16 @@ struct TextButton: View {
 }
 
 /// 按下缩放 0.98（设计文档 §8.4）。
+/// Reduce Motion 时禁用缩放（缩放属位移类动效，§8.5「Reduce Motion 全降级」）。
 struct PressScaleButtonStyle: ButtonStyle {
+    var isReducedMotion: Bool = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(Theme.Motion.hover, value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !isReducedMotion ? 0.98 : 1)
+            .animation(
+                Theme.Motion.resolved(Theme.Motion.hover, isReduced: isReducedMotion),
+                value: configuration.isPressed
+            )
     }
 }

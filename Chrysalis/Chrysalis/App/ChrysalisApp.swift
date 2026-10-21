@@ -6,12 +6,18 @@ import SwiftUI
 struct ChrysalisApp: App {
     @State private var store = QueueStore()
 
+    /// 仅截图辅助用：强制浅色外观（`--capture-light`）。
+    private static var forceLightAppearance: Bool {
+        ProcessInfo.processInfo.arguments.contains("--capture-light")
+    }
+
     var body: some Scene {
         WindowGroup {
             QueueScreen()
                 .environment(store)
                 .frame(minWidth: 960, minHeight: 620)
                 .tint(Theme.accent)
+                .preferredColorScheme(Self.forceLightAppearance ? .light : nil)
                 .task {
                     await store.bootstrap()
                     await captureScreenshotsIfNeeded()

@@ -37,6 +37,13 @@ struct JobRowView: View {
         .onTapGesture {
             store.selectedJobID = job.id
         }
+        // 键盘可达（设计文档 §8.7「全键盘可达」）：Tab 可聚焦到任务行，回车打开检查器。
+        .focusable(true)
+        .onKeyPress(.return) {
+            store.selectedJobID = job.id
+            store.openInspector(for: job.id)
+            return .handled
+        }
         .contextMenu {
             if job.mediaKind == .movie, !job.metadataState.isConfirmed {
                 Button("确认元数据…") {
@@ -115,6 +122,68 @@ struct JobRowView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+        // VoiceOver：读出文件名 + 状态 + 进度 + 速度 + 错误（设计文档 §8.7）
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(job.displayName)
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    /// VoiceOver 摘要：状态、进度、速度、剩余时间、错误原因。
+    private var accessibilitySummary: String {
+        var parts: [String] = ["预设 \(job.preset.name)", accessibilityStateText]
+
+        switch job.state {
+        case .running:
+            if let progress = job.progress {
+                parts.append("进度 \(Fmt.percent(progress.fraction))")
+                parts.append("速度 \(Fmt.speed(progress.speed))")
+                if let eta = progress.etaSeconds {
+                    parts.append("剩余 \(Fmt.duration(seconds: eta))")
+                }
+            }
+        case .failed(let message):
+            parts.append("错误：\(message)")
+        default:
+            break
+        }
+
+        if job.mediaKind == .movie {
+            parts.append(movieAccessibilityText)
+        }
+        return parts.joined(separator: "，")
+    }
+
+    private var accessibilityStateText: String {
+        switch job.state {
+        case .queued: "排队中"
+        case .preparing: "准备中"
+        case .running: "转码中"
+        case .finishing: "写入中"
+        case .cancelling: "取消中"
+        case .completed: "已完成"
+        case .cancelled: "已取消，可重试"
+        case .interrupted: "已中断，可重试"
+        case .failed: "失败"
+        }
+    }
+
+    private var movieAccessibilityText: String {
+        switch job.metadataState {
+        case .confirmed:
+            if let metadata = job.movieMetadata {
+                let year = metadata.year.map { "（\($0)）" } ?? ""
+                return "电影，已确认《\(metadata.title)》\(year)"
+            }
+            return "电影，元数据已确认"
+        case .searching:
+            return "电影，匹配元数据中"
+        case .needsReview:
+            return "电影，元数据待确认"
+        case .failed:
+            return "电影，匹配失败"
+        case .none:
+            return "电影，未开始匹配"
+        }
     }
 
     private var secondaryLine: String {
@@ -168,6 +237,7 @@ struct JobRowView: View {
         HStack(spacing: Theme.Spacing.s1) {
             StatusDot(color: dotColor, breathing: job.state.isActive)
             PresetChip(title: job.preset.name)
+                .accessibilityHidden(true)
             acceleratorBadge
             statusNumbers
 

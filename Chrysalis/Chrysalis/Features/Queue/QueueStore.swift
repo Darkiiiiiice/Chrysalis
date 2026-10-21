@@ -24,12 +24,32 @@ final class QueueStore {
         var message: String
     }
 
+    /// 底部居中 Toast（设计文档 §8.4）：短暂提示，4 秒自动消失，可带一个次级动作。
+    struct Toast: Identifiable, Equatable, Sendable {
+        enum Kind: Sendable {
+            case info
+            case warning
+        }
+
+        enum Action: Sendable, Equatable {
+            case none
+            case revealOutputFolder
+        }
+
+        let id = UUID()
+        var kind: Kind
+        var message: String
+        var action: Action
+    }
+
     // MARK: - 对外状态
 
     private(set) var jobs: [TranscodeJob] = []
     private(set) var capabilities: HardwareCapabilities?
     private(set) var thumbnails: [UUID: CGImage] = [:]
     private(set) var banner: Banner?
+    /// 底部 Toast（短暂提示；与顶部的错误 banner 分流，设计文档 §8.4）。
+    private(set) var toast: Toast?
     private(set) var isRunningBatch = false
     private(set) var outputDirectory: URL?
     /// 添加 Sheet 待入队的文件（设计文档 §8.6 添加文件）。
@@ -67,7 +87,7 @@ final class QueueStore {
     private var engines: [UUID: TranscodeEngine] = [:]
     private var runnerTask: Task<Void, Never>?
     private var isStopRequested = false
-    private var bannerDismissTask: Task<Void, Never>?
+    private var toastDismissTask: Task<Void, Never>?
     /// 已选择输出目录的沙盒作用域持有（选择器返回的 URL 需要显式开始访问）。
     private var heldOutputScopeURL: URL?
     /// 输出目录的 App Scope 安全书签（重启恢复，设计文档 §9）。
@@ -337,12 +357,24 @@ final class QueueStore {
             isRunningBatch = false
             runnerTask = nil
         }
+        var completedInBatch = 0
         while !isStopRequested {
             // 未确认元数据的电影任务在队列中等待确认，不参与本轮批量（设计文档 §7.5）
             guard let next = jobs.first(where: {
                 $0.state == .queued && $0.mediaInfo != nil && !$0.needsMetadataConfirmation
             }) else { break }
             await runJob(id: next.id)
+            if jobs.first(where: { $0.id == next.id })?.state == .completed {
+                completedInBatch += 1
+            }
+        }
+        // 批量结束：底部 Toast 汇总，不用模态弹窗（设计文档 §8.4）
+        if !isStopRequested, completedInBatch > 0 {
+            showToast(
+                kind: .info,
+                message: "已完成 \(completedInBatch) 个任务",
+                action: .revealOutputFolder
+            )
         }
     }
 
@@ -932,28 +964,47 @@ final class QueueStore {
         QueueArchive(jobs: jobs, outputDirectoryBookmark: outputDirectoryBookmarkData).save()
     }
 
-    // MARK: - 横幅
+    // MARK: - 横幅与 Toast
 
+    /// 提示入口（设计文档 §8.4）：
+    /// - `.error` → 队列顶部 inline banner（需要用户处理，不自动消失）；
+    /// - `.info` / `.warning` → 底部 Toast（4 秒自动消失，不用模态弹窗）。
     func showBanner(kind: Banner.Kind, message: String) {
-        let newBanner = Banner(kind: kind, message: message)
-        banner = newBanner
-        bannerDismissTask?.cancel()
-        guard kind != .error else { return }
+        switch kind {
+        case .error:
+            toastDismissTask?.cancel()
+            toastDismissTask = nil
+            toast = nil
+            banner = Banner(kind: kind, message: message)
+        case .info:
+            showToast(kind: .info, message: message)
+        case .warning:
+            showToast(kind: .warning, message: message)
+        }
+    }
 
-        // 非错误提示 4 秒自动消失（设计文档 §8.4 Toast 规则）
-        bannerDismissTask = Task { [weak self] in
+    /// 底部 Toast：短暂提示，4 秒自动消失（设计文档 §8.4）。
+    func showToast(kind: Toast.Kind, message: String, action: Toast.Action = .none) {
+        let newToast = Toast(kind: kind, message: message, action: action)
+        toast = newToast
+        toastDismissTask?.cancel()
+        toastDismissTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
-            if self?.banner?.id == newBanner.id {
-                self?.banner = nil
+            if self?.toast?.id == newToast.id {
+                self?.toast = nil
             }
         }
     }
 
     func dismissBanner() {
-        bannerDismissTask?.cancel()
-        bannerDismissTask = nil
         banner = nil
+    }
+
+    func dismissToast() {
+        toastDismissTask?.cancel()
+        toastDismissTask = nil
+        toast = nil
     }
 }
 
