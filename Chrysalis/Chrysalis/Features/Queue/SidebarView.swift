@@ -4,6 +4,7 @@ import SwiftUI
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case queue
     case presets
+    case subtitles
     case history
     case settings
 
@@ -13,6 +14,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .queue: "队列"
         case .presets: "预设"
+        case .subtitles: "字幕"
         case .history: "历史"
         case .settings: "设置"
         }
@@ -22,6 +24,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .queue: "rectangle.stack"
         case .presets: "slider.horizontal.3"
+        case .subtitles: "text.quote"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
         }

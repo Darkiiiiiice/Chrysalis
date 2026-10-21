@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct ChrysalisApp: App {
     @State private var store = QueueStore()
+    @State private var subtitleStore = SubtitleStore()
 
     /// 仅截图辅助用：强制浅色外观（`--capture-light`）。
     private static var forceLightAppearance: Bool {
@@ -15,6 +16,7 @@ struct ChrysalisApp: App {
         WindowGroup {
             QueueScreen()
                 .environment(store)
+                .environment(subtitleStore)
                 .frame(minWidth: 960, minHeight: 620)
                 .tint(Theme.accent)
                 .preferredColorScheme(Self.forceLightAppearance ? .light : nil)

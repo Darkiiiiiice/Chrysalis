@@ -85,6 +85,8 @@ struct QueueScreen: View {
             QueueContentView()
         case .presets:
             PresetsScreen()
+        case .subtitles:
+            SubtitlesScreen()
         case .history:
             HistoryScreen()
         case .settings:
