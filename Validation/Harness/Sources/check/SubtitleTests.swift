@@ -173,4 +173,49 @@ func runSubtitleTests() async {
             try expect(outcome.newLines != document.rawLines, "内容已更新")
         }
     }
+
+    await h.suite("字幕：内容理解纯函数（P8.4）") {
+        h.run("金句原文校验：命中的保留、未命中丢弃") {
+            let document = try SubtitleParser.parse(text: assSample, format: .ass)
+            let quotes = [
+                SubtitleQuote(text: "你好，世界！", startSeconds: 1, endSeconds: 2, kind: "台词"),
+                SubtitleQuote(text: "这句台词根本不存在于字幕里", startSeconds: 3, endSeconds: 4, kind: "独白"),
+            ]
+            let validated = SubtitleInsightsEngine.validatedQuotes(quotes, document: document)
+            try expectEqual(validated.count, 1, "只有原文命中的金句保留")
+            try expectEqual(validated[0].text, "你好，世界！", "保留的是命中句")
+        }
+        h.run("分块：按 5 分钟窗口切片") {
+            let document = try SubtitleParser.parse(text: assSample, format: .ass)
+            let chunks = SubtitleInsightsEngine.chunkSummaries(document, chunkSeconds: 5)
+            try expectEqual(chunks.count, 3, "0–5s / 5–10s / 10–15s 三个窗口（10s 双语对在第三窗）")
+        }
+        h.run("对白统计：ASS Name 字段计数") {
+            let document = try SubtitleParser.parse(text: assSample, format: .ass)
+            let stats = SubtitleInsightsEngine.speakerStats(from: document)
+            try expectEqual(stats["小明"], 1, "小明一条")
+        }
+        h.run("Markdown 导出包含三段") {
+            let document = try SubtitleParser.parse(text: assSample, format: .ass)
+            let insights = SubtitleInsights(
+                summary: "测试摘要。",
+                quotes: [SubtitleQuote(text: "你好，世界！", startSeconds: 1, endSeconds: 2, kind: "台词")],
+                speakerStats: ["小明": 1]
+            )
+            let markdown = insights.markdown(fileName: "测试.ass")
+            try expect(markdown.contains("## 摘要") && markdown.contains("测试摘要。"), "摘要段")
+            try expect(markdown.contains("00:01 – 00:02"), "金句时间戳")
+            try expect(markdown.contains("小明：1 条"), "对白统计")
+        }
+        h.run("JSON 金句解析（宽容代码块包裹）") {
+            let json = """
+            ```json
+            [{"text":"你好，世界！","startSeconds":1,"endSeconds":2,"kind":"台词"}]
+            ```
+            """
+            let quotes = SubtitleInsightsSession.parseQuotes(from: json)
+            try expectEqual(quotes.count, 1, "解析一条")
+            try expectEqual(quotes[0].text, "你好，世界！", "内容")
+        }
+    }
 }

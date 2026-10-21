@@ -6,6 +6,9 @@ struct SubtitlesScreen: View {
     @Environment(SubtitleStore.self) private var store
     @State private var isImporterPresented = false
     @State private var selectedRules: Set<SubtitleRule> = []
+    @State private var insightsSession = SubtitleInsightsSession()
+    @State private var insightsAvailability: SubtitleInsightAvailability = .deviceUnsupported
+    @State private var exportedPath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -31,7 +34,10 @@ struct SubtitlesScreen: View {
                 print("选择字幕失败：\(error.localizedDescription)")
             }
         }
-        .onAppear(perform: syncSelectedRules)
+        .onAppear {
+            syncSelectedRules()
+            insightsAvailability = SubtitleInsightAvailability.current()
+        }
         .onChange(of: store.selection) { _, _ in
             syncSelectedRules()
         }
@@ -151,6 +157,7 @@ struct SubtitlesScreen: View {
                         overviewSection(item)
                         reportSection(item)
                         fixSection(item)
+                        insightsSection(item)
                     }
                     HStack {
                         TextButton(title: "在 Finder 中显示") {
@@ -245,6 +252,97 @@ struct SubtitlesScreen: View {
             return
         }
         selectedRules = Set(item.report.issues.filter(\.autoFixable).map(\.rule))
+    }
+
+    // MARK: 内容理解（P8.4，Foundation Models 本地推理）
+
+    @ViewBuilder
+    private func insightsSection(_ item: SubtitleItem) -> some View {
+        InspectorSection(title: "内容理解（本地 AI）") {
+            switch insightsAvailability {
+            case .available:
+                if let insights = item.insights {
+                    Text(insights.summary)
+                        .font(Theme.TextStyle.body)
+                        .foregroundStyle(Theme.textPrimary)
+                        .textSelection(.enabled)
+
+                    if !insights.quotes.isEmpty {
+                        Text("金句")
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        ForEach(insights.quotes, id: \.text) { quote in
+                            Text("\(quote.timeRange)｜\(quote.text)（\(quote.kind)）")
+                                .font(Theme.TextStyle.body)
+                                .foregroundStyle(Theme.textPrimary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if !insights.speakerStats.isEmpty {
+                        Text("对白统计")
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        Text(insights.speakerStats.sorted { $0.value > $1.value }
+                            .map { "\($0.key)：\($0.value) 条" }
+                            .joined(separator: " · "))
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+
+                    HStack {
+                        TextButton(title: "复制 Markdown") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(
+                                insights.markdown(fileName: item.fileName), forType: .string
+                            )
+                        }
+                        TextButton(title: "导出 Markdown") {
+                            exportedPath = store.exportMarkdown(itemID: item.id)?.path
+                        }
+                        Spacer()
+                    }
+                    if let exportedPath {
+                        Text("已导出：\(exportedPath)")
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.success)
+                            .textSelection(.enabled)
+                    }
+                } else if insightsSession.isRunning {
+                    HStack(spacing: Theme.Spacing.s2) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(insightsSession.progressText.isEmpty ? "生成中…" : insightsSession.progressText)
+                            .font(Theme.TextStyle.body)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                } else {
+                    PrimaryButton(title: "生成内容理解（摘要 / 金句 / 对白统计）") {
+                        Task {
+                            await insightsSession.run(document: item.document, fileName: item.fileName)
+                            if let insights = insightsSession.insights {
+                                store.attachInsights(itemID: item.id, insights: insights)
+                            }
+                        }
+                    }
+                    Text("全程本地推理，无任何网络请求。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    if let error = insightsSession.errorText {
+                        Text(error)
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.error)
+                    }
+                }
+            case .appleIntelligenceDisabled:
+                Text(SubtitleInsightAvailability.appleIntelligenceDisabled.guidance)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            case .deviceUnsupported:
+                Text(SubtitleInsightAvailability.deviceUnsupported.guidance)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
     }
 
     private func severityColor(_ severity: SubtitleSeverity) -> Color {

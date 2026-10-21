@@ -17,6 +17,8 @@ struct SubtitleItem: Identifiable {
     var isFixed = false
     /// 载入失败（解析/编码错误）时的占位信息。
     var errorText: String?
+    /// P8.4 内容理解结果（生成后挂载）。
+    var insights: SubtitleInsights?
 
     var fileName: String { url.lastPathComponent }
 }
@@ -117,6 +119,27 @@ final class SubtitleStore {
 
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// 挂载内容理解结果。
+    func attachInsights(itemID: UUID, insights: SubtitleInsights) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+        items[index].insights = insights
+    }
+
+    /// 导出内容理解 Markdown（写源目录 `<名称>-insights.md`，原子落盘），返回导出路径。
+    func exportMarkdown(itemID: UUID) -> URL? {
+        guard let item = items.first(where: { $0.id == itemID }), let insights = item.insights else { return nil }
+        let text = insights.markdown(fileName: item.fileName)
+        let target = item.url.deletingLastPathComponent().appendingPathComponent(
+            "\(item.url.deletingPathExtension().lastPathComponent)-insights.md"
+        )
+        do {
+            try text.write(to: target, atomically: true, encoding: .utf8)
+            return target
+        } catch {
+            return nil
+        }
     }
 
     /// 可自动修复的问题数（按钮启用判定）。
