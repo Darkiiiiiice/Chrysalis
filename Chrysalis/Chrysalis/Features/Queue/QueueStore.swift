@@ -724,6 +724,25 @@ final class QueueStore {
         isInspectorPresented = true
     }
 
+    // MARK: - A/B 对比（设计文档 §7.9）
+
+    /// 已完成任务 → 对比上下文（仅 completed 且输出存在）。
+    func compareContext(for jobID: UUID) -> CompareContext? {
+        guard let job = jobs.first(where: { $0.id == jobID }),
+              job.state == .completed, let outputURL = job.outputURL else { return nil }
+        return CompareContext(sourceURL: job.inputURL, outputURL: outputURL, sourceBookmark: job.inputBookmark)
+    }
+
+    /// 历史条目 → 对比上下文（仅成功记录且输出存在）。
+    func compareContext(for entry: HistoryEntry) -> CompareContext? {
+        guard entry.kind == .completed, let outputPath = entry.outputPath else { return nil }
+        return CompareContext(
+            sourceURL: URL(fileURLWithPath: entry.inputPath),
+            outputURL: URL(fileURLWithPath: outputPath),
+            sourceBookmark: entry.inputBookmark
+        )
+    }
+
     // MARK: - 电影元数据（设计文档 §7.5）
 
     /// 单任务「电影」开关。

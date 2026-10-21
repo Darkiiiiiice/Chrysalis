@@ -5,6 +5,12 @@ import SwiftUI
 /// 分区：输入 / 输出 / 硬件 / 错误。
 struct InspectorView: View {
     @Environment(QueueStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
+
+    /// A/B 对比窗口入口（设计文档 §7.9）。
+    private func openCompare(_ context: CompareContext) {
+        openWindow(value: context)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -230,8 +236,15 @@ struct InspectorView: View {
                 value: job.outputURL?.lastPathComponent ?? "开始时生成（重名加 -1）"
             )
             if job.state == .completed, let outputURL = job.outputURL {
-                TextButton(title: "在 Finder 中显示") {
-                    store.revealInFinder(outputURL)
+                HStack {
+                    TextButton(title: "在 Finder 中显示") {
+                        store.revealInFinder(outputURL)
+                    }
+                    TextButton(title: "A/B 对比", tint: Theme.accent) {
+                        if let context = store.compareContext(for: job.id) {
+                            openCompare(context)
+                        }
+                    }
                 }
             }
             if !job.notes.isEmpty {

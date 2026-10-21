@@ -3,6 +3,7 @@ import SwiftUI
 /// 历史页（设计文档 §8.6）：原生 Table，行高 36，右键 Finder 定位 / 重新转码 / 编辑元数据 / 删除记录。
 struct HistoryScreen: View {
     @Environment(QueueStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
 
     @State private var selection: Set<HistoryEntry.ID> = []
     @State private var metadataContext: HistoryMetadataContext?
@@ -154,6 +155,13 @@ struct HistoryScreen: View {
         if let output = entry.outputPath, FileManager.default.fileExists(atPath: output) {
             Button("在 Finder 中显示") {
                 store.revealInFinder(URL(fileURLWithPath: output))
+            }
+            if entry.kind == .completed {
+                Button("A/B 对比…") {
+                    if let context = store.compareContext(for: entry) {
+                        openWindow(value: context)
+                    }
+                }
             }
         }
         Button("重新转码") {

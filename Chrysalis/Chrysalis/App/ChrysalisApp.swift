@@ -38,6 +38,15 @@ struct ChrysalisApp: App {
                 .tint(Theme.accent)
         }
         .windowResizability(.contentSize)
+
+        // A/B 质量对比窗口（设计文档 §7.9）：openWindow(value:) 携带上下文
+        WindowGroup(for: CompareContext.self) { $context in
+            if let context {
+                CompareScreen(context: context)
+                    .tint(Theme.accent)
+            }
+        }
+        .defaultSize(width: 1024, height: 680)
     }
 }
 

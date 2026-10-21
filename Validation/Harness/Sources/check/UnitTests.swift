@@ -164,6 +164,64 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("A/B 对比（CompareSpecs / CompareContext，§7.9）") {
+        h.run("CompareContext：路径往返与标题") {
+            let context = CompareContext(
+                sourceURL: URL(fileURLWithPath: "/tmp/movie.mov"),
+                outputURL: URL(fileURLWithPath: "/out/movie.mp4"),
+                sourceBookmark: Data([1, 2, 3])
+            )
+            try expectEqual(context.sourceURL.path(percentEncoded: false), "/tmp/movie.mov", "源路径")
+            try expectEqual(context.outputURL.path(percentEncoded: false), "/out/movie.mp4", "输出路径")
+            try expectEqual(context.title, "movie.mov", "标题 = 源文件名")
+        }
+        h.run("CompareContext：Codable 往返（窗口路由值）") {
+            let original = CompareContext(
+                sourceURL: URL(fileURLWithPath: "/tmp/a b/片名.mov"),
+                outputURL: URL(fileURLWithPath: "/out/片名.mp4")
+            )
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(CompareContext.self, from: data)
+            try expectEqual(decoded, original, "编码解码应等值")
+        }
+        h.run("summaryLine：分辨率 · 编码 · 码率 · 体积") {
+            let info = MediaInfo(
+                containerLabel: "MP4",
+                fileSizeBytes: 134_217_728,
+                durationSeconds: 60,
+                video: VideoStreamInfo(
+                    codecFourCC: "hvc1", codecName: "hevc",
+                    displayWidth: 1920, displayHeight: 1080, frameRate: 30,
+                    bitrate: 4_200_000, hardwareDecodeSupported: true
+                ),
+                audio: nil,
+                isHDR: false,
+                hdrLabel: nil,
+                hasProtectedContent: false
+            )
+            let line = CompareSpecs.summaryLine(info)
+            try expect(line.contains("1920×1080"), "含分辨率：\(line)")
+            try expect(line.contains("HEVC"), "含编码大写：\(line)")
+            try expect(line.contains("Mbps"), "含码率：\(line)")
+            try expect(line.contains("MB"), "含体积：\(line)")
+        }
+        h.run("summaryLine：无视频轨时不崩溃") {
+            let info = MediaInfo(
+                containerLabel: "MP4",
+                fileSizeBytes: 1024,
+                durationSeconds: 1,
+                video: nil,
+                audio: nil,
+                isHDR: false,
+                hdrLabel: nil,
+                hasProtectedContent: false
+            )
+            let line = CompareSpecs.summaryLine(info)
+            try expect(line.contains("—"), "缺视频轨显示占位：\(line)")
+            try expect(line.contains("1 KB"), "体积仍在：\(line)")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool
