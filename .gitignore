@@ -19,6 +19,15 @@ Validation/P0/artifacts/
 # P6 harness 产物（测试片/输出/报告，不入库）
 Validation/Harness/artifacts/
 
+# P7 模型工具：开发期本地环境、权重与转换产物（不入库）
+Validation/Models/.venv/
+Validation/Models/weights/
+Validation/Models/build/
+Validation/Models/artifacts/
+Validation/P7/artifacts/
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
 
