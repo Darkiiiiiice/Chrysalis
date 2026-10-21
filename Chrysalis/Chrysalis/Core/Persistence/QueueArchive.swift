@@ -67,6 +67,8 @@ struct QueueArchive: Codable {
         var movieMetadata: MovieMetadata?
         /// 任务级画质修复（§7.6）；旧队列文件没有该字段，缺省即关闭。
         var enhancement: EnhancementSetting?
+        /// 样片试编码实测结果（§7.8）；旧队列文件没有该字段，缺省即未试编码。
+        var probeResult: BitrateProbeResult?
 
         init(_ job: TranscodeJob) {
             self.id = job.id
@@ -84,6 +86,7 @@ struct QueueArchive: Codable {
             self.metadataState = job.metadataState
             self.movieMetadata = job.movieMetadata
             self.enhancement = job.enhancement
+            self.probeResult = job.probeResult
         }
     }
 

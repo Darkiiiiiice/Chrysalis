@@ -60,6 +60,12 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var movieMetadata: MovieMetadata?
     /// 任务级画质修复（设计文档 §7.6）；nil 表示关闭。
     var enhancement: EnhancementSetting?
+    /// 样片试编码实测结果（设计文档 §7.8）；nil 表示尚未试编码。
+    var probeResult: BitrateProbeResult?
+    /// 正在执行样片试编码（检查器按钮防重复触发）。
+    var isProbing = false
+    /// 试编码进度文案（探测中非 nil，如「第 2/3 段」）；不持久化。
+    var probeProgressText: String?
 
     init(id: UUID = UUID(), inputURL: URL, preset: TranscodePreset = .defaultPreset) {
         self.id = id

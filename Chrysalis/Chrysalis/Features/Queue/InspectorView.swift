@@ -192,14 +192,38 @@ struct InspectorView: View {
                 label: "音频",
                 value: "\(job.preset.audio.codecLabel) · \(job.preset.audio.channelLabel)"
             )
-            if let info = job.mediaInfo, let dims = targetDimensions(job) {
-                let estimate = job.preset.estimatedBytes(
-                    durationSeconds: info.durationSeconds,
-                    videoWidth: dims.width,
-                    videoHeight: dims.height,
-                    frameRate: info.video?.frameRate ?? 30
-                )
-                InspectorRow(label: "预计大小", value: "≈ \(Fmt.bytes(estimate))")
+            if let info = job.mediaInfo {
+                // 预计大小（设计文档 §7.8）：有试编码实测时优先用实测外推并标注来源
+                if let probe = job.probeResult {
+                    let estimate = probe.estimatedBytes(forFullDuration: info.durationSeconds)
+                    InspectorRow(label: "预计大小", value: "≈ \(Fmt.bytes(estimate))（试编码实测）")
+                } else if let dims = targetDimensions(job) {
+                    let estimate = job.preset.estimatedBytes(
+                        durationSeconds: info.durationSeconds,
+                        videoWidth: dims.width,
+                        videoHeight: dims.height,
+                        frameRate: info.video?.frameRate ?? 30
+                    )
+                    InspectorRow(label: "预计大小", value: "≈ \(Fmt.bytes(estimate))（按参数估算）")
+                }
+
+                // 试编码精确估算（设计文档 §7.8）：手动触发，仅排队中；探测中禁止重复
+                if job.isProbing {
+                    InspectorRow(label: "试编码", value: job.probeProgressText ?? "进行中…")
+                } else if job.state == .queued {
+                    TextButton(
+                        title: job.probeResult == nil ? "试编码精确估算" : "重新试编码",
+                        tint: Theme.accent
+                    ) {
+                        store.runProbe(jobID: job.id)
+                    }
+                }
+                if let probe = job.probeResult {
+                    InspectorRow(
+                        label: "实测码率",
+                        value: "\(Fmt.mbps(probe.averageBitrate)) · \(probe.segmentBitrates.count) 段 / \(String(format: "%.1f", probe.sampledSeconds)) 秒"
+                    )
+                }
             }
             InspectorRow(
                 label: "输出文件",

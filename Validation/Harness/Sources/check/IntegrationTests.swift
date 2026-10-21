@@ -472,11 +472,93 @@ func runIntegrationTests() async {
 
     // P7.4 画质修复验收（单帧 / tile 接缝 / 端到端 / 吞吐；设计文档 §7.6）
     await runEnhancementAcceptance()
+
+    await h.suite("集成：样片试编码（§7.8）") {
+        // 引擎 sourceTimeRange 截取：段时长 ≈ 请求时长，音视频同步输出
+        await h.runAsync("引擎 sourceTimeRange：中段截取 4 秒") {
+            try requireHardwareEncoder()
+            let longSource = try await sourceClip("源-10秒-360p.mp4") { url in
+                ClipFactory.Spec(
+                    url: url, size: CGSize(width: 640, height: 360),
+                    codec: .h264, bitrate: 1_500_000, duration: 10
+                )
+            }
+            var request = makeRequest(input: longSource, output: outputs.appendingPathComponent("out-range.mp4"), codec: .h264, container: .mp4)
+            request.sourceTimeRange = CMTimeRange(
+                start: CMTime(seconds: 3, preferredTimescale: 600),
+                duration: CMTime(seconds: 4, preferredTimescale: 600)
+            )
+            let outcome = try await run(request)
+            try expect(abs(outcome.durationSeconds - 4.0) < 0.6, "段时长应 ≈ 4 秒：\(outcome.durationSeconds)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs(info.durationSeconds - 4.0) < 0.6, "读回时长 ≈ 4 秒：\(info.durationSeconds)")
+            try expect(info.audio != nil, "音频轨随段截取输出（同步）")
+        }
+
+        // 端到端 probe：16 秒 360p 片 → 3 段实测 → 码率合理、临时输出清理
+        await h.runAsync("端到端 probe：3 段实测 + 临时清理") {
+            try requireHardwareEncoder()
+            let longSource = try await sourceClip("源-16秒-360p.mp4") { url in
+                ClipFactory.Spec(
+                    url: url, size: CGSize(width: 640, height: 360),
+                    codec: .h264, bitrate: 1_500_000, duration: 16
+                )
+            }
+            let request = makeRequest(input: longSource, output: outputs.appendingPathComponent("unused.mp4"), codec: .h264, container: .mp4)
+            let counter = LockedCounter()
+            let result = try await BitrateProbeService.run(request: request, sourceDuration: 16) { _, _, _ in
+                counter.increment()
+            }
+            try expectEqual(counter.value, 3, "每段一次进度回调")
+            try expectEqual(result.segmentBitrates.count, 3, "3 段码率")
+            try expect(result.segmentBitrates.allSatisfy { $0 > 100_000 && $0 < 30_000_000 }, "段码率在合理区间：\(result.segmentBitrates)")
+            try expect(abs(result.sampledSeconds - 12.0) < 1.5, "采样总时长 ≈ 12 秒：\(result.sampledSeconds)")
+            try expect(result.averageBitrate > 100_000, "平均码率 > 100 kbps：\(result.averageBitrate)")
+            let estimate = result.estimatedBytes(forFullDuration: 16)
+            try expect(estimate > 0, "全片外推体积 > 0：\(estimate)")
+            let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path))?
+                .filter { $0.hasPrefix("chrysalis-probe-") } ?? []
+            try expect(leftovers.isEmpty, "探测临时目录应清理：\(leftovers)")
+        }
+
+        // 探测结果驱动磁盘预检：注入超大实测码率 → lowDiskSpace
+        await h.runAsync("实测码率驱动磁盘预检：超大值触发 lowDiskSpace") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-probe-disk.mp4"), codec: .h264, container: .mp4)
+            request.measuredTotalBitrate = 1_000_000_000_000_000  // 1 Pbps → 预计 250 TB
+            do {
+                _ = try await run(request)
+                throw TestFailure(message: "应因实测码率外推体积超出磁盘空间失败", file: #filePath, line: #line)
+            } catch let error as TranscodeEngineError {
+                guard case .lowDiskSpace = error else {
+                    throw TestFailure(message: "应为 lowDiskSpace：\(error)", file: #filePath, line: #line)
+                }
+            }
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。
 func requireHardwareEncoder(_ codec: VideoCodec = .h264) throws {
     guard VideoToolboxCapabilities.probe().hardwareEncoder(for: codec) != nil else {
         throw SkipReason(message: "本机没有 \(codec.displayName) 硬件编码器")
+    }
+}
+
+/// 线程安全计数器（@Sendable 闭包内累加用）。
+final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }

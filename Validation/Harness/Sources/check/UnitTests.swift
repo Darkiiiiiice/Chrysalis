@@ -108,6 +108,62 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("样片试编码抽段（BitrateProbeService，§7.8）") {
+        h.run("长片：均匀 3 段各 4 秒，避开片头片尾 5%") {
+            let segments = BitrateProbeService.segments(forDuration: 600)
+            try expectEqual(segments.count, 3, "默认 3 段")
+            try expect(segments.allSatisfy { abs($0.length - 4) < 0.01 }, "每段 4 秒：\(segments)")
+            let margin = 600 * 0.05
+            try expect(segments.allSatisfy { $0.start >= margin - 0.01 }, "不早于片头 5%：\(segments.map(\.start))")
+            try expect(
+                segments.allSatisfy { $0.start + $0.length <= 600 - margin + 0.01 },
+                "不晚于片尾 5%：\(segments.map { $0.start + $0.length })"
+            )
+            try expect(segments[0].start < segments[1].start && segments[1].start < segments[2].start, "起点递增")
+        }
+        h.run("短片（10 秒）：缩段仍 3 段") {
+            let segments = BitrateProbeService.segments(forDuration: 10)
+            try expectEqual(segments.count, 3, "不足 15 秒缩段但保持 3 段")
+            try expect(segments.allSatisfy { $0.length < 4 }, "段长应缩到 4 秒以下：\(segments.map(\.length))")
+            try expect(
+                segments.allSatisfy { $0.start >= 0 && $0.start + $0.length <= 10 + 0.01 },
+                "段不越过片尾：\(segments)"
+            )
+        }
+        h.run("超短源（4 秒）：单段 = 时长 ×0.5 居中") {
+            let segments = BitrateProbeService.segments(forDuration: 4)
+            try expectEqual(segments.count, 1, "超短源单段")
+            try expect(abs(segments[0].length - 2) < 0.01, "段长 = 时长一半：\(segments[0].length)")
+            try expect(abs(segments[0].start - 1) < 0.01, "居中起点：\(segments[0].start)")
+        }
+        h.run("非法时长返回空") {
+            try expect(BitrateProbeService.segments(forDuration: 0).isEmpty, "零时长应返回空")
+            try expect(BitrateProbeService.segments(forDuration: -5).isEmpty, "负时长应返回空")
+            try expect(BitrateProbeService.segments(forDuration: .infinity).isEmpty, "无穷应返回空")
+        }
+        h.run("estimatedBytes：实测码率 × 全片时长") {
+            let result = BitrateProbeResult(
+                averageBitrate: 4_000_000,
+                sampledSeconds: 12,
+                segmentBitrates: [4_000_000, 4_000_000, 4_000_000],
+                createdAt: Date()
+            )
+            try expectEqual(result.estimatedBytes(forFullDuration: 600), Int64(4_000_000 / 8 * 600), "300 MB 外推")
+            try expectEqual(result.estimatedBytes(forFullDuration: 0), Int64(0), "零时长为 0")
+        }
+        h.run("Codable 往返：归档持久化兼容") {
+            let original = BitrateProbeResult(
+                averageBitrate: 4_567_890,
+                sampledSeconds: 12.4,
+                segmentBitrates: [4_000_000, 5_100_000, 4_600_000],
+                createdAt: Date(timeIntervalSince1970: 1_790_000_000)
+            )
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(BitrateProbeResult.self, from: data)
+            try expectEqual(decoded, original, "编码解码应等值")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

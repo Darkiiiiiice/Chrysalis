@@ -241,6 +241,10 @@ actor TranscodeEngine {
         guard reader.canAdd(videoOutput) else {
             throw TranscodeEngineError.readerSetupFailed("无法添加视频输出")
         }
+        // 样片试编码（设计文档 §7.8）：截取源时间轴（PTS 保持源时间，写入端会按段起点开 session）
+        if let range = request.sourceTimeRange {
+            reader.timeRange = range
+        }
 
         // 音频目标格式（设计文档 §6.3）：解码端直接输出「目标采样率 + 目标声道」的 LPCM，
         // 保证读写两端格式严格一致。AAC 编码器对不同采样率/声道有各自的合法码率上限
@@ -362,9 +366,17 @@ actor TranscodeEngine {
             }
         }
 
-        var requiredBytes = Int64(nominalVideoBitrate + audioNominalBitrate) / 8 * Int64(durationSecondsPre)
-        if request.bitrateMode == .targetSize, !request.videoCodec.isProRes, let targetBytes = request.targetSizeBytes {
-            requiredBytes = max(requiredBytes, targetBytes)
+        // 磁盘预检（设计文档 §6.1 第 9 条 / §7.8）：试编码实测码率优先，否则用名义值；
+        // 探测模式按段时长估算（输出即删，不需要全片余量）
+        let estimateSeconds = request.sourceTimeRange?.duration.seconds ?? durationSecondsPre
+        var requiredBytes: Int64
+        if let measured = request.measuredTotalBitrate {
+            requiredBytes = Int64(Double(measured) / 8.0 * estimateSeconds)
+        } else {
+            requiredBytes = Int64(nominalVideoBitrate + audioNominalBitrate) / 8 * Int64(estimateSeconds)
+            if request.bitrateMode == .targetSize, !request.videoCodec.isProRes, let targetBytes = request.targetSizeBytes {
+                requiredBytes = max(requiredBytes, targetBytes)
+            }
         }
         try checkDiskSpace(directory: outputDirectory, requiredBytes: requiredBytes + 200 * 1_048_576)
 
@@ -469,6 +481,7 @@ actor TranscodeEngine {
         }
 
         // 启动（RequireHardware 标志在此被接受或拒绝，设计文档 §7）
+        // 样片试编码：输出 PTS 保持源时间（reader.timeRange 截取），session 从段起点开启
         do {
             try writer.start()
         } catch {
@@ -480,7 +493,7 @@ actor TranscodeEngine {
             let hint = request.requireHardware ? "（通常是没有可用的硬件编码器）" : ""
             throw TranscodeEngineError.writerSetupFailed("启动写入失败\(hint)：\(errorText(error))")
         }
-        writer.startSession(atSourceTime: .zero)
+        writer.startSession(atSourceTime: request.sourceTimeRange?.start ?? .zero)
 
         // 输出读取端（outputProvider 取代 reader.add，必须在 start() 之前注册）
         let videoProvider = reader.outputProvider(for: videoOutput)
@@ -503,7 +516,13 @@ actor TranscodeEngine {
 
         // MARK: 读写循环（每轨一个异步泵；背压由 receiver.append 挂起处理）
         let started = Date.now
-        let durationSeconds = duration.seconds.isFinite ? duration.seconds : 0
+        // 样片试编码（§7.8）：截取段的时长是进度 / 速度 / 外推的基准，非全片
+        let durationSeconds: Double
+        if let range = request.sourceTimeRange {
+            durationSeconds = range.duration.seconds.isFinite ? range.duration.seconds : 0
+        } else {
+            durationSeconds = duration.seconds.isFinite ? duration.seconds : 0
+        }
 
         do {
             let finalStats = try await withThrowingTaskGroup(of: PumpStats.self) { group in
@@ -643,13 +662,17 @@ actor TranscodeEngine {
 
         let wallSeconds = Date.now.timeIntervalSince(started)
         let size = (((try? fm.attributesOfItem(atPath: finalURL.path))?[.size]) as? Int64) ?? 0
-        var verificationIssues = await verifyOutput(
-            url: finalURL,
-            expectedDuration: durationSeconds,
-            expectedCodec: request.videoCodec,
-            expectedSize: renderSize,
-            expectedAudioPCMBitDepth: request.audioPCMSampleBitDepth
-        )
+        // 样片试编码（设计文档 §7.8）：输出即删，跳过全部自检（expectedDuration 是全片时长会误报）
+        var verificationIssues: [String] = []
+        if !request.isProbe {
+            verificationIssues = await verifyOutput(
+                url: finalURL,
+                expectedDuration: durationSeconds,
+                expectedCodec: request.videoCodec,
+                expectedSize: renderSize,
+                expectedAudioPCMBitDepth: request.audioPCMSampleBitDepth
+            )
+        }
         if let metadata = request.metadata {
             verificationIssues += await MetadataWriter.verificationIssues(
                 url: finalURL,

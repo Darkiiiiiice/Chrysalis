@@ -417,47 +417,14 @@ final class QueueStore {
             posterData = await metadataService.posterData(path: posterPath)
         }
 
-        // P3.5：码率按目标分辨率（短边匹配、只缩不放）缩放
-        // 画质修复（设计文档 §7.6）：输出 = 源 ×2，码率按 2x 尺寸估算；分辨率档位锁定「保持源」
-        let enhanced = job.enhancement != nil
-        let targetSize = enhanced
-            ? CGSize(width: video.displayWidth * 2, height: video.displayHeight * 2)
-            : (job.preset.resolution.renderSize(
-                sourceWidth: video.displayWidth,
-                sourceHeight: video.displayHeight
-            ) ?? CGSize(width: video.displayWidth, height: video.displayHeight))
-
-        let request = TranscodeRequest(
-            inputURL: job.inputURL,
+        // P3.5：码率按目标分辨率（短边匹配、只缩不放）缩放——构造逻辑见 makeRequest
+        let request = makeRequest(
+            for: job,
+            video: video,
             outputURL: outputURL,
-            videoCodec: job.preset.videoCodec,
-            container: job.preset.container,
-            resolution: enhanced ? .source : job.preset.resolution,
-            frameRate: job.preset.frameRate,
-            averageBitrate: job.preset.videoCodec.isProRes
-                || job.preset.bitrateMode != .targetBitrate
-                ? nil
-                : job.preset.averageBitrate(
-                    videoWidth: Int(targetSize.width),
-                    videoHeight: Int(targetSize.height)
-                ),
-            bitrateMode: job.preset.bitrateMode,
-            quality: job.preset.quality,
-            targetSizeBytes: job.preset.bitrateMode == .targetSize && !job.preset.videoCodec.isProRes
-                ? Int64(job.preset.targetSizeMB) * 1_000_000
-                : nil,
-            bitrateRange: job.preset.bitrateRange,
-            keyframeInterval: job.preset.keyframeInterval,
-            profile: job.preset.profile,
-            audioBitrate: job.preset.audio.bitrate,
-            audioMaxChannels: job.preset.audio.maxChannels,
-            audioSampleRate: job.preset.audio.sampleRateOverride,
-            audioPCMSampleBitDepth: job.preset.audio.pcmBitDepth,
-            requireHardware: true,
             encoderID: encoder.encoderID,
-            metadata: job.movieMetadata,
             posterData: posterData,
-            enhancement: job.enhancement
+            measuredTotalBitrate: job.probeResult?.averageBitrate
         )
 
         let engine = TranscodeEngine()
@@ -484,6 +451,128 @@ final class QueueStore {
                 fail(id: id, message: message)
             }
         }
+    }
+
+    /// 由任务快照构造引擎请求（正式转码与试编码共用，设计文档 §7.8）：
+    /// P3.5 码率按目标分辨率缩放；画质修复（§7.6）输出 = 源 ×2、档位锁定「保持源」。
+    private func makeRequest(
+        for job: TranscodeJob,
+        video: VideoStreamInfo,
+        outputURL: URL,
+        encoderID: String?,
+        posterData: Data?,
+        measuredTotalBitrate: Int? = nil
+    ) -> TranscodeRequest {
+        let enhanced = job.enhancement != nil
+        let targetSize = enhanced
+            ? CGSize(width: video.displayWidth * 2, height: video.displayHeight * 2)
+            : (job.preset.resolution.renderSize(
+                sourceWidth: video.displayWidth,
+                sourceHeight: video.displayHeight
+            ) ?? CGSize(width: video.displayWidth, height: video.displayHeight))
+
+        return TranscodeRequest(
+            inputURL: job.inputURL,
+            outputURL: outputURL,
+            videoCodec: job.preset.videoCodec,
+            container: job.preset.container,
+            resolution: enhanced ? .source : job.preset.resolution,
+            frameRate: job.preset.frameRate,
+            averageBitrate: job.preset.videoCodec.isProRes
+                || job.preset.bitrateMode != .targetBitrate
+                ? nil
+                : job.preset.averageBitrate(
+                    videoWidth: Int(targetSize.width),
+                    videoHeight: Int(targetSize.height)
+                ),
+            bitrateMode: job.preset.bitrateMode,
+            quality: job.preset.quality,
+            targetSizeBytes: job.preset.bitrateMode == .targetSize && !job.preset.videoCodec.isProRes
+                ? Int64(job.preset.targetSizeMB) * 1_000_000
+                : nil,
+            bitrateRange: job.preset.bitrateRange,
+            keyframeInterval: job.preset.keyframeInterval,
+            profile: job.preset.profile,
+            audioBitrate: job.preset.audio.bitrate,
+            audioMaxChannels: job.preset.audio.maxChannels,
+            audioSampleRate: job.preset.audio.sampleRateOverride,
+            audioPCMSampleBitDepth: job.preset.audio.pcmBitDepth,
+            requireHardware: true,
+            encoderID: encoderID,
+            metadata: job.movieMetadata,
+            posterData: posterData,
+            enhancement: job.enhancement,
+            measuredTotalBitrate: measuredTotalBitrate
+        )
+    }
+
+    // MARK: - 样片试编码（设计文档 §7.8）
+
+    /// 手动触发试编码：仅排队中任务；探测中禁止重复触发。
+    /// 结果写回任务（持久化），失败不影响任务状态（正式转码照常）。
+    func runProbe(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .queued, !jobs[index].isProbing else { return }
+        let job = jobs[index]
+        guard let mediaInfo = job.mediaInfo, let video = mediaInfo.video else { return }
+        guard let encoder = capabilities?.hardwareEncoder(for: job.preset.videoCodec) else {
+            showBanner(
+                kind: .error,
+                message: "未找到 \(job.preset.videoCodec.displayName) 硬件编码器，无法试编码。"
+            )
+            return
+        }
+
+        jobs[index].isProbing = true
+        jobs[index].probeProgressText = "准备中…"
+
+        // 试编码与正式任务完全相同的参数；输出落在服务自己的临时目录，不写海报
+        let request = makeRequest(
+            for: job,
+            video: video,
+            outputURL: FileManager.default.temporaryDirectory,
+            encoderID: encoder.encoderID,
+            posterData: nil
+        )
+        let duration = mediaInfo.durationSeconds
+        let inputURL = job.inputURL
+
+        Task { [weak self] in
+            let scoped = inputURL.startAccessingSecurityScopedResource()
+            defer { if scoped { inputURL.stopAccessingSecurityScopedResource() } }
+            guard let self else { return }
+
+            do {
+                let result = try await BitrateProbeService.run(
+                    request: request,
+                    sourceDuration: duration
+                ) { [weak self] segment, total, _ in
+                    Task { @MainActor [weak self] in
+                        guard let index = self?.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                        self?.jobs[index].probeProgressText = "第 \(segment + 1)/\(total) 段"
+                    }
+                }
+                guard let index = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                self.jobs[index].probeResult = result
+                self.jobs[index].isProbing = false
+                self.jobs[index].probeProgressText = nil
+                self.saveQueue()
+                self.showToast(kind: .info, message: "试编码完成：实测 \(Fmt.mbps(result.averageBitrate))")
+            } catch {
+                guard let index = self.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+                self.jobs[index].isProbing = false
+                self.jobs[index].probeProgressText = nil
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                self.showBanner(kind: .error, message: "\(self.jobs[index].displayName)：试编码失败——\(message)")
+            }
+        }
+    }
+
+    /// 清除试编码结果（重新探测前可手动清理；参数改动后自动失效的场景见检查器）。
+    func clearProbe(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        jobs[index].probeResult = nil
+        saveQueue()
     }
 
     func cancelJob(_ id: UUID) {

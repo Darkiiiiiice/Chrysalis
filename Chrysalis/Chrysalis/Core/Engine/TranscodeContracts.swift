@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 
 /// 引擎输入参数（值类型；引擎据此构建 reader/writer）。
@@ -43,6 +44,14 @@ struct TranscodeRequest: Sendable {
     ///
     /// 开启时引擎锁定源分辨率，输出尺寸 = 源显示尺寸 ×2。
     var enhancement: EnhancementSetting? = nil
+    /// 样片试编码（设计文档 §7.8）：截取源时间轴的片段；nil = 全片。
+    ///
+    /// 仅试编码使用——输出落在临时目录、编码后即删。
+    var sourceTimeRange: CMTimeRange? = nil
+    /// 试编码模式：跳过输出自检与元数据写入自检（结果即弃）。
+    var isProbe = false
+    /// 样片试编码实测总码率（bps，设计文档 §7.8）：磁盘预检优先使用；nil 回退名义值。
+    var measuredTotalBitrate: Int? = nil
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。
