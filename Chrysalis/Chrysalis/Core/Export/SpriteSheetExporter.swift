@@ -126,7 +126,7 @@ enum SpriteSheetExporter {
                 }
                 if let size = canvas, size.width > 0, size.height > 0 {
                     let tileHeight = size.height / CGFloat(layout.rows)
-                    if let tile = resized(image: frame, width: CGFloat(SpriteLayout.tileWidth), height: tileHeight) {
+                    if let tile = resizedTile(image: frame, width: CGFloat(SpriteLayout.tileWidth), height: tileHeight) {
                         tiles.append(tile)
                     }
                 }
@@ -211,8 +211,8 @@ enum SpriteSheetExporter {
 
     // MARK: - 工具
 
-    /// 等比缩放到目标尺寸（长宽比不一致时填充居中——generator 输出与源同比例，实际等比直达）。
-    private static func resized(image: CGImage, width: CGFloat, height: CGFloat) -> CGImage? {
+    /// 等比缩放到目标尺寸（长宽比不一致时填充居中——generator 输出与源同比例，实际等比直达；雪碧图 / 动态壁纸共用）。
+    static func resizedTile(image: CGImage, width: CGFloat, height: CGFloat) -> CGImage? {
         let sourceWidth = CGFloat(image.width)
         let sourceHeight = CGFloat(image.height)
         guard sourceWidth > 0, sourceHeight > 0 else { return nil }

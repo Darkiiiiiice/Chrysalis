@@ -1043,6 +1043,44 @@ func runIntegrationTests() async {
             try expect(second.lastPathComponent == "sprite-dup-1.jpg", "重名 -1：\(second.lastPathComponent)")
         }
     }
+
+    await h.suite("集成：动态壁纸（§7.19）") {
+        await h.runAsync("HEIC 序列导出：帧数、尺寸与 apple_desktop 元数据") {
+            let output = outputs.appendingPathComponent("wallpaper-clip.heic")
+            let final = try await DynamicWallpaperExporter.export(url: h264Source, outputURL: output)
+            try expect(FileManager.default.fileExists(atPath: final.path), "输出存在")
+            guard let source = CGImageSourceCreateWithURL(final as CFURL, nil) else {
+                throw TestFailure(message: "HEIC 读回失败", file: #filePath, line: #line)
+            }
+            try expectEqual(CGImageSourceGetCount(source), 16, "16 帧")
+            guard let first = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                throw TestFailure(message: "主图解码失败", file: #filePath, line: #line)
+            }
+            try expectEqual(first.width, 1920, "1080p 源宽度不变")
+            // apple_desktop:dynamic 元数据（主图 XMP tag）
+            guard let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) else {
+                throw TestFailure(message: "主图 metadata 缺失", file: #filePath, line: #line)
+            }
+            guard let base64 = CGImageMetadataCopyStringValueWithPath(metadata, nil, "apple_desktop:dynamic" as CFString),
+                  let data = Data(base64Encoded: base64 as String),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                  let dict = plist as? [String: Any],
+                  let states = dict["d"] as? [[String: Any]]
+            else {
+                throw TestFailure(message: "apple_desktop:dynamic 元数据缺失或无法解码", file: #filePath, line: #line)
+            }
+            try expectEqual(states.count, 16, "d 数组 16 项")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        await h.runAsync("动态壁纸重名：连续导出不覆盖") {
+            let output = outputs.appendingPathComponent("wallpaper-dup.heic")
+            let first = try await DynamicWallpaperExporter.export(url: h264Source, outputURL: output)
+            let second = try await DynamicWallpaperExporter.export(url: h264Source, outputURL: output)
+            try expect(first.lastPathComponent == "wallpaper-dup.heic", "首取原名：\(first.lastPathComponent)")
+            try expect(second.lastPathComponent == "wallpaper-dup-1.heic", "重名 -1：\(second.lastPathComponent)")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

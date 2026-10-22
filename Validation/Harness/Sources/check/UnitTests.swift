@@ -882,6 +882,39 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("动态壁纸（§7.19）") {
+        h.run("时间模式状态表：16 项均匀映射") {
+            let states = DynamicWallpaperExporter.states()
+            try expectEqual(states.count, 16, "16 状态")
+            try expectEqual(states.first?.minute, 0, "首状态 0 分钟")
+            try expectEqual(states.last?.minute, 1439, "末状态 1439 分钟")
+            try expect(states.map(\.index) == Array(0..<16), "索引递增")
+            try expect(states.map(\.minute) == states.map(\.minute).sorted(), "t 单调递增")
+        }
+        h.run("base64 plist 往返：d 数组可解") {
+            guard let base64 = DynamicWallpaperExporter.base64Plist(),
+                  let data = Data(base64Encoded: base64),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                  let dict = plist as? [String: Any],
+                  let states = dict["d"] as? [[String: Any]]
+            else {
+                throw TestFailure(message: "plist 解码失败", file: #filePath, line: #line)
+            }
+            try expectEqual(states.count, 16, "d 数组 16 项")
+            try expectEqual(states[0]["i"] as? Int, 0, "首项索引")
+            try expectEqual(states[15]["t"] as? Int, 1439, "末项时间")
+        }
+        h.run("壁纸尺寸：跟随源、5120 上限") {
+            let same = DynamicWallpaperExporter.outputSize(sourceWidth: 3840, sourceHeight: 2160)
+            try expectEqual(same?.width ?? 0, CGFloat(3840), "4K 原样")
+            try expectEqual(same?.height ?? 0, CGFloat(2160), "高不变")
+            let downscaled = DynamicWallpaperExporter.outputSize(sourceWidth: 8192, sourceHeight: 4320)
+            try expectEqual(downscaled?.width ?? 0, CGFloat(5120), "超上限缩到 5120")
+            try expectEqual(downscaled?.height ?? 0, CGFloat(2700), "高等比 2700")
+            try expect(DynamicWallpaperExporter.outputSize(sourceWidth: 0, sourceHeight: 0) == nil, "非法尺寸 nil")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

@@ -8,6 +8,7 @@ final class ExportToolsStore {
         case audio
         case gif
         case sprite
+        case wallpaper
 
         var id: String { rawValue }
 
@@ -16,6 +17,7 @@ final class ExportToolsStore {
             case .audio: "音频提取"
             case .gif: "GIF 动图"
             case .sprite: "雪碧图"
+            case .wallpaper: "动态壁纸"
             }
         }
     }
@@ -49,8 +51,13 @@ final class ExportToolsStore {
     var spriteProgress: Double = 0
     var spriteExportURL: URL?
 
+    // 动态壁纸
+    var isExportingWallpaper = false
+    var wallpaperProgress: Double = 0
+    var wallpaperExportURL: URL?
+
     var isBusy: Bool {
-        isAnalyzing || isExtracting || isExportingGif || isExportingSprite
+        isAnalyzing || isExtracting || isExportingGif || isExportingSprite || isExportingWallpaper
     }
 
     var canExtractAudio: Bool {
@@ -65,6 +72,10 @@ final class ExportToolsStore {
         selectedURL != nil && !isBusy
     }
 
+    var canExportWallpaper: Bool {
+        selectedURL != nil && !isBusy
+    }
+
     /// 选择文件并分析音轨（fileImporter / 拖放共用）。
     func select(url: URL) {
         guard !isBusy else { return }
@@ -75,6 +86,7 @@ final class ExportToolsStore {
         exportURL = nil
         gifExportURL = nil
         spriteExportURL = nil
+        wallpaperExportURL = nil
         Task { await analyzeCurrent() }
     }
 
@@ -174,6 +186,32 @@ final class ExportToolsStore {
             store.message = error
         } finish: { store in
             store.isExportingSprite = false
+        }
+    }
+
+    /// 导出动态壁纸：写源文件目录 `<名称>-动态壁纸.heic`（时间模式 16 状态）。
+    func exportWallpaper() {
+        guard canExportWallpaper, let url = selectedURL else { return }
+        let target = url.deletingLastPathComponent()
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent + "-动态壁纸.heic")
+        isExportingWallpaper = true
+        wallpaperProgress = 0
+        message = nil
+        wallpaperExportURL = nil
+        runExport(target: target) { store, url in
+            try await DynamicWallpaperExporter.export(url: url, outputURL: target) { fraction in
+                Task { @MainActor [weak self] in
+                    self?.wallpaperProgress = fraction
+                }
+            }
+        } completion: { store, output in
+            store.wallpaperExportURL = output
+            store.wallpaperProgress = 1
+            store.message = "已导出：\(output.lastPathComponent)"
+        } failure: { store, error in
+            store.message = error
+        } finish: { store in
+            store.isExportingWallpaper = false
         }
     }
 

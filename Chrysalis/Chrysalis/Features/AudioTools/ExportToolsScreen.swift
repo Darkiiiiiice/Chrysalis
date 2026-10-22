@@ -85,6 +85,8 @@ struct ExportToolsScreen: View {
                     gifSection
                 case .sprite:
                     spriteSection
+                case .wallpaper:
+                    wallpaperSection
                 }
             }
             .padding(Theme.Spacing.s3)
@@ -298,6 +300,43 @@ struct ExportToolsScreen: View {
             if let spriteExportURL = store.spriteExportURL {
                 TextButton(title: "在 Finder 中显示") {
                     NSWorkspace.shared.activateFileViewerSelecting([spriteExportURL])
+                }
+            }
+        }
+    }
+
+    // MARK: 动态壁纸（灵感 15）
+
+    @ViewBuilder
+    private var wallpaperSection: some View {
+        InspectorSection(title: "动态壁纸") {
+            HStack(spacing: Theme.Spacing.s2) {
+                PrimaryButton(
+                    title: store.isExportingWallpaper ? "导出中…" : "导出动态壁纸",
+                    systemImage: "sparkles",
+                    isEnabled: store.canExportWallpaper
+                ) {
+                    store.exportWallpaper()
+                }
+
+                if store.isExportingWallpaper {
+                    ProgressView(value: max(store.wallpaperProgress, 0.02))
+                        .frame(maxWidth: 200)
+                    Text(Fmt.percent(store.wallpaperProgress))
+                        .font(Theme.TextStyle.numeric)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer()
+            }
+            Text("macOS 动态壁纸（时间模式）：均匀抽取 16 帧写入 HEIC 序列，随一天时刻自动切换；帧分辨率跟随源（超 5120 宽自动缩放），输出写到源文件所在目录，重名自动加 -1。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+            Text("导入：系统设置 → 壁纸 → 「添加文件夹或相册」选取该 .heic，并把模式切到「自动」即可生效。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+            if let wallpaperExportURL = store.wallpaperExportURL {
+                TextButton(title: "在 Finder 中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([wallpaperExportURL])
                 }
             }
         }
