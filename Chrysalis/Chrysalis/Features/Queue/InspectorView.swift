@@ -24,6 +24,7 @@ struct InspectorView: View {
                         metadataSection(job)
                         outputSection(job)
                         enhancementSection(job)
+                        loudnessSection(job)
                         hardwareSection(job)
                         errorSection(job)
                     }
@@ -318,6 +319,57 @@ struct InspectorView: View {
             return "\(String(format: "%.0f", fps)) fps（保持源）"
         }
         return "\(String(format: "%.0f", fps)) fps"
+    }
+
+    // MARK: 音频响度（设计文档 §7.11）
+
+    /// 响度标准化分区：排队中可编辑（开关 + 三档）；运行后只读。
+    @ViewBuilder
+    private func loudnessSection(_ job: TranscodeJob) -> some View {
+        InspectorSection(title: "音频响度") {
+            if job.state == .queued {
+                HStack(spacing: Theme.Spacing.s2) {
+                    Toggle("响度标准化", isOn: Binding(
+                        get: { job.loudness != nil },
+                        set: { enabled in
+                            store.setLoudness(
+                                enabled ? (job.loudness ?? LoudnessSetting()) : nil,
+                                jobID: job.id
+                            )
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .font(Theme.TextStyle.body)
+                    Spacer()
+                }
+
+                if let setting = job.loudness {
+                    Picker("目标", selection: Binding(
+                        get: { setting.target },
+                        set: { newValue in
+                            var updated = setting
+                            updated.target = newValue
+                            store.setLoudness(updated, jobID: job.id)
+                        }
+                    )) {
+                        ForEach(LoudnessTarget.allCases) { target in
+                            Text(target.displayName).tag(target)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(Theme.TextStyle.caption)
+                    Text("转码时自动测量全片响度并拉齐到目标；增益受真峰上限 \(String(format: "%.0f", setting.peakCeilingDb)) dBTP 约束。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else {
+                InspectorRow(
+                    label: "响度标准化",
+                    value: job.loudness.map { "开启 · \($0.target.displayName)" } ?? "关闭"
+                )
+            }
+        }
     }
 
     // MARK: 画质修复（设计文档 §7.6 / §8）

@@ -62,6 +62,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var enhancement: EnhancementSetting?
     /// 样片试编码实测结果（设计文档 §7.8）；nil 表示尚未试编码。
     var probeResult: BitrateProbeResult?
+    /// 音频响度标准化设置（设计文档 §7.11）；nil = 关闭（默认）。
+    var loudness: LoudnessSetting?
     /// 正在执行样片试编码（检查器按钮防重复触发）。
     var isProbing = false
     /// 试编码进度文案（探测中非 nil，如「第 2/3 段」）；不持久化。

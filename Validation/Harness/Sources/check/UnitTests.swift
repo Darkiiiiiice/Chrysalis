@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 // MARK: - 单元测试（设计文档 §11 单元测试清单）
@@ -375,6 +376,95 @@ func runUnitTests() async {
             let data = try JSONEncoder().encode(report)
             let decoded = try JSONDecoder().decode(MediaProbeReport.self, from: data)
             try expectEqual(decoded, report, "编码解码应等值")
+        }
+    }
+
+    await h.suite("音频响度（LoudnessMeter，§7.11）") {
+        h.run("integrated：恒定块能量还原目标响度") {
+            // -23 LUFS 对应每帧跨声道平方和均值 = 10^((-23+0.691)/10)
+            let meanSquare = pow(10.0, (-23.0 + 0.691) / 10.0)
+            // 段值口径：每帧跨声道加权平方和均值（measure 输出口径）
+            let segments = Array(repeating: meanSquare, count: 200)
+            let integrated = LoudnessMeter.integrated(segmentSums: segments, blockLength: 19200, hopLength: 4800)
+            try expect(integrated != nil, "恒定能量应有结果")
+            guard let value = integrated else { return }
+            try expect(abs(value - -23.0) < 0.05, "integrated ≈ -23 LUFS：\(value)")
+        }
+        h.run("integrated：门限逻辑（静音段被剔除）") {
+            // 响块 + 大量低于 -70 LUFS 的静音块 → gated 后 ≈ 响块响度
+            let loudMeanSquare = pow(10.0, (-16.0 + 0.691) / 10.0)
+            let quietMeanSquare = pow(10.0, (-90.0 + 0.691) / 10.0)
+            var segments: [Double] = []
+            for _ in 0..<100 { segments.append(loudMeanSquare) }
+            for _ in 0..<400 { segments.append(quietMeanSquare) }
+            let integrated = LoudnessMeter.integrated(segmentSums: segments, blockLength: 19200, hopLength: 4800)
+            try expect(integrated != nil, "应有结果")
+            guard let value = integrated else { return }
+            try expect(abs(value - -16.0) < 0.1, "静音段应被门限剔除：\(value)")
+        }
+        h.run("integrated：样本不足返回 nil") {
+            try expect(LoudnessMeter.integrated(segmentSums: [1, 2, 3], blockLength: 19200, hopLength: 4800) == nil, "不足 4 段返回 nil")
+            try expect(LoudnessMeter.integrated(segmentSums: [], blockLength: 19200, hopLength: 4800) == nil, "空返回 nil")
+        }
+        h.run("增益：无峰限直拉 / 峰限夹取 / 降增益") {
+            let setting = LoudnessSetting(target: .lufs14, peakCeilingDb: -1)
+            // 实测 -20 → raw +6 dB；真峰 -10 dBFS → ceilingGain = -1 - (-10) = +9 > +6 → 不限峰
+            let free = LoudnessMeter.gain(
+                measurement: LoudnessMeasurement(integratedLufs: -20, truePeakDb: -10, sampleCount: 1000),
+                setting: setting
+            )
+            try expect(abs(free.gainDb - 6) < 0.001, "无峰限增益 = +6：\(free.gainDb)")
+            try expectEqual(free.peakLimited, false, "未触发峰限")
+            // 真峰 0 dBFS → ceilingGain = -1 < +6 → 夹到 -1
+            let limited = LoudnessMeter.gain(
+                measurement: LoudnessMeasurement(integratedLufs: -20, truePeakDb: 0, sampleCount: 1000),
+                setting: setting
+            )
+            try expect(abs(limited.gainDb - -1) < 0.001, "峰限增益夹到 -1：\(limited.gainDb)")
+            try expectEqual(limited.peakLimited, true, "触发峰限")
+            // 降增益：实测 -10 → -4 dB
+            let down = LoudnessMeter.gain(
+                measurement: LoudnessMeasurement(integratedLufs: -10, truePeakDb: -6, sampleCount: 1000),
+                setting: setting
+            )
+            try expect(abs(down.gainDb - -4) < 0.001, "降增益 = -4：\(down.gainDb)")
+            try expectEqual(down.peakLimited, false, "降增益不触峰限")
+        }
+        h.run("Biquad：高通滤除直流 / 冲激有界") {
+            var highpass = LoudnessMeter.Biquad(b: [1.0, -2.0, 1.0], a: [1, -1.99004745483398, 0.99007225036621])
+            // 恒定直流输入：稳态输出趋近 0
+            var tail = 0.0
+            for index in 0..<20000 {
+                let y = highpass.process(0.5)
+                if index >= 19990 { tail = y }
+            }
+            try expect(abs(tail) < 1e-3, "直流稳态输出应趋近 0：\(tail)")
+            // 冲激响应：幅值有界
+            var impulse = LoudnessMeter.Biquad(b: [1.0, -2.0, 1.0], a: [1, -1.99004745483398, 0.99007225036621])
+            var peak = 0.0
+            _ = impulse.process(1.0)
+            for index in 1..<2000 {
+                let y = impulse.process(0)
+                if index > 10 { peak = max(peak, abs(y)) }
+            }
+            try expect(peak < 0.1, "冲激响应应有界且衰减：\(peak)")
+        }
+        h.run("LoudnessSetting：Codable 往返") {
+            let original = LoudnessSetting(target: .lufs23, peakCeilingDb: -2)
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(LoudnessSetting.self, from: data)
+            try expectEqual(decoded, original, "编码解码应等值")
+        }
+        h.run("scale：Float 逐样本乘法") {
+            var values: [Float] = [0.1, -0.2, 0.0, 0.25, -0.5]
+            try values.withUnsafeMutableBufferPointer { buffer in
+                LoudnessMeter.scale(floats: buffer.baseAddress!, count: buffer.count, gain: 2.0)
+            }
+            try expectEqual(values[0], Float(0.2), "0.1 ×2")
+            try expectEqual(values[1], Float(-0.4), "-0.2 ×2")
+            try expectEqual(values[2], Float(0.0), "0 ×2")
+            try expectEqual(values[3], Float(0.5), "0.25 ×2")
+            try expectEqual(values[4], Float(-1.0), "-0.5 ×2")
         }
     }
 

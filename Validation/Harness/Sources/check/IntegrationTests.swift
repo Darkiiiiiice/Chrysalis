@@ -600,6 +600,37 @@ func runIntegrationTests() async {
             try expect(markdown.contains("moov 前置"), "含 moov 行")
         }
     }
+
+    await h.suite("集成：音频响度标准化（§7.11）") {
+        // 测量：ClipFactory 音频 = 440 Hz 正弦 0.25 幅度立体声，解析值 ≈ -12.7 LUFS
+        await h.runAsync("measure：合成正弦响度符合解析值") {
+            let measurement = try await LoudnessMeter.measure(url: h264Source, maxChannels: 2)
+            try expect(abs(measurement.integratedLufs - -12.73) < 1.0, "440 Hz 0.25 幅度立体声 ≈ -12.7 LUFS：\(measurement.integratedLufs)")
+            try expect(measurement.truePeakDb > -14 && measurement.truePeakDb < -10, "真峰 ≈ 0.25 幅度（-12 dBFS）：\(measurement.truePeakDb)")
+            try expect(measurement.sampleCount > 80_000, "2 秒 48 kHz 样本量充足：\(measurement.sampleCount)")
+        }
+
+        // 端到端：目标 -14 LUFS → 输出实测命中 ±1 LU
+        await h.runAsync("端到端：目标 -14 LUFS 输出实测命中") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-loudness.mp4"), codec: .h264, container: .mp4)
+            request.loudness = LoudnessSetting(target: .lufs14)
+            let outcome = try await run(request)
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            try expect(outcome.notes.contains { $0.contains("响度实测") }, "notes 记录实测：\(outcome.notes)")
+            let after = try await LoudnessMeter.measure(url: outcome.outputURL, maxChannels: 2)
+            try expect(abs(after.integratedLufs - -14.0) < 1.0, "输出响度应命中 -14 ±1：\(after.integratedLufs)")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 默认关闭：行为不变
+        await h.runAsync("关闭时不加响度 notes") {
+            try requireHardwareEncoder()
+            let request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-noloudness.mp4"), codec: .h264, container: .mp4)
+            let outcome = try await run(request)
+            try expect(!outcome.notes.contains { $0.contains("响度实测") }, "关闭时无响度记录")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

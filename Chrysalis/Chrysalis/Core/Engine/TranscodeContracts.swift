@@ -52,6 +52,8 @@ struct TranscodeRequest: Sendable {
     var isProbe = false
     /// 样片试编码实测总码率（bps，设计文档 §7.8）：磁盘预检优先使用；nil 回退名义值。
     var measuredTotalBitrate: Int? = nil
+    /// 音频响度标准化（设计文档 §7.11）；nil = 关闭（默认）。
+    var loudness: LoudnessSetting? = nil
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。

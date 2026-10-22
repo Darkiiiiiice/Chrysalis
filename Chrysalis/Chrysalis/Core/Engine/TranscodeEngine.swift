@@ -302,6 +302,30 @@ actor TranscodeEngine {
             }
         }
 
+        // 响度标准化（设计文档 §7.11）：preparing 阶段全片测量（48 kHz 口径同音频泵），增益作用于 PCM 帧
+        let loudnessGain: Float
+        if let setting = request.loudness, audioOutput != nil, let target = audioTarget {
+            do {
+                let measurement = try await LoudnessMeter.measure(url: request.inputURL, maxChannels: target.channels)
+                let result = LoudnessMeter.gain(measurement: measurement, setting: setting)
+                loudnessGain = Float(pow(10.0, result.gainDb / 20.0))
+                let gainText = result.gainDb >= 0 ? "+" : ""
+                notes.append(
+                    "响度实测 \(String(format: "%.1f", measurement.integratedLufs)) LUFS → 目标 \(setting.target.lufs)：增益 \(gainText)\(String(format: "%.1f", result.gainDb)) dB"
+                )
+                if result.peakLimited {
+                    notes.append(
+                        "已按真峰上限 \(String(format: "%.0f", setting.peakCeilingDb)) dBTP 压低增益（实测真峰 \(String(format: "%.1f", measurement.truePeakDb)) dBFS，按原增益会削波）"
+                    )
+                }
+            } catch {
+                loudnessGain = 1.0
+                notes.append("响度测量失败，本次跳过标准化：\(errorText(error))")
+            }
+        } else {
+            loudnessGain = 1.0
+        }
+
         // MARK: 码率规划与磁盘预检（设计文档 §6.1 第 9 条 / P4）
 
         let audioNominalBitrate: Int
@@ -601,6 +625,12 @@ actor TranscodeEngine {
                             }
                             guard let ready else { break }
                             if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
+                            if loudnessGain != 1.0 {
+                                // 响度增益（设计文档 §7.11）：原地作用于 PCM 帧数据
+                                try ready.withUnsafeSampleBuffer { sampleBuffer in
+                                    LoudnessMeter.applyGain(to: sampleBuffer, linearGain: loudnessGain)
+                                }
+                            }
                             do {
                                 try await audioReceiver.append(ready)
                             } catch {

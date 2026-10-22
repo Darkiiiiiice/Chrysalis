@@ -502,7 +502,8 @@ final class QueueStore {
             metadata: job.movieMetadata,
             posterData: posterData,
             enhancement: job.enhancement,
-            measuredTotalBitrate: measuredTotalBitrate
+            measuredTotalBitrate: measuredTotalBitrate,
+            loudness: job.loudness
         )
     }
 
@@ -779,6 +780,15 @@ final class QueueStore {
         saveQueue()
     }
 
+    /// 单任务音频响度标准化（设计文档 §7.11）：仅排队中的任务可改；nil 关闭。
+    func setLoudness(_ setting: LoudnessSetting?, jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .queued else { return }
+        guard jobs[index].loudness != setting else { return }
+        jobs[index].loudness = setting
+        saveQueue()
+    }
+
     /// 自动匹配的最高分候选摘要（队列行 / 检查器直接展示，不必点开确认窗口）。
     func matchedSummary(jobID: UUID) -> TMDBMovieSummary? {
         movieCandidates[jobID]?.first?.summary
@@ -1025,6 +1035,9 @@ final class QueueStore {
             job.metadataState = persisted.metadataState
                 ?? (job.mediaKind == .movie ? .needsReview : .none)
             job.movieMetadata = persisted.movieMetadata
+            job.enhancement = persisted.enhancement
+            job.probeResult = persisted.probeResult
+            job.loudness = persisted.loudness
             job.state = persisted.state.restoredState
             if job.state == .interrupted {
                 interruptedCount += 1
