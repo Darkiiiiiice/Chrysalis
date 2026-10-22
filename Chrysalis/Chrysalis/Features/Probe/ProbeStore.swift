@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Observation
 import os
@@ -12,6 +13,62 @@ final class ProbeStore {
     private(set) var isDeepScanning = false
     /// 上次操作的提示（底部轻提示，非模态）。
     private(set) var message: String?
+
+    // MARK: 跨文件去重（设计文档 §7.14）
+
+    /// 去重指纹（仅内存，不建库）。
+    struct DedupState {
+        var fingerprints: [VideoFingerprint.ClipFingerprint] = []
+        var groups: [VideoFingerprint.DuplicateGroup] = []
+        var isRunning = false
+        var progress: Double = 0
+        var errorText: String?
+    }
+
+    private(set) var dedup = DedupState()
+
+    /// 计算多个视频的指纹并分组近重复。
+    func runDedup(urls: [URL]) {
+        guard !dedup.isRunning, !urls.isEmpty else { return }
+        dedup.isRunning = true
+        dedup.progress = 0
+        dedup.errorText = nil
+        dedup.groups = []
+        dedup.fingerprints = []
+
+        Task { [weak self] in
+            var fingerprints: [VideoFingerprint.ClipFingerprint] = []
+            for (index, url) in urls.enumerated() {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+                let asset = AVURLAsset(url: url)
+                let duration = (try? await asset.load(.duration).seconds) ?? 0
+                do {
+                    let fingerprint = try await VideoFingerprint.fingerprint(
+                        url: url, fileName: url.lastPathComponent,
+                        sourceDuration: duration.isFinite ? duration : 0
+                    )
+                    fingerprints.append(fingerprint)
+                } catch {
+                    fingerprints.append(VideoFingerprint.ClipFingerprint(fileName: url.lastPathComponent, frameHashes: []))
+                    self?.dedup.errorText = "「\(url.lastPathComponent)」指纹计算失败，已跳过比对。"
+                }
+                let value = Double(index + 1) / Double(urls.count)
+                self?.dedup.progress = value
+            }
+            let groups = VideoFingerprint.duplicateGroups(fingerprints: fingerprints)
+            guard let self else { return }
+            self.dedup.fingerprints = fingerprints
+            self.dedup.groups = groups
+            self.dedup.isRunning = false
+            self.message = groups.isEmpty ? "未发现近重复文件。" : "发现 \(groups.count) 组近重复文件。"
+        }
+    }
+
+    func resetDedup() {
+        dedup = DedupState()
+    }
 
     /// 对文件执行快速体检（秒级）。
     func probe(url: URL) async {
@@ -43,6 +100,16 @@ final class ProbeStore {
         } else {
             self.report?.deepError = "抽样读取失败：文件可能损坏或无法解封装。"
             message = "深度探测失败。"
+        }
+
+        // 假 4K 检测（§7.14）：深度探测时顺带抽帧分析
+        if let video = self.report?.video {
+            self.report?.upscale = try? await UpscaleDetector.detect(
+                url: url,
+                sourceWidth: video.displayWidth,
+                sourceHeight: video.displayHeight,
+                sourceDuration: self.report?.durationSeconds ?? 0
+            )
         }
     }
 

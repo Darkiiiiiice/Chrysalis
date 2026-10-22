@@ -6,6 +6,8 @@ struct ProbeScreen: View {
     @Environment(ProbeStore.self) private var store
     @Environment(QueueStore.self) private var queueStore
     @State private var isImporterPresented = false
+    @State private var isDedupImporterPresented = false
+    @State private var isDedupSheetPresented = false
     @State private var isDropTargeted = false
 
     var body: some View {
@@ -17,6 +19,9 @@ struct ProbeScreen: View {
             }
         }
         .background(Theme.bg)
+        .sheet(isPresented: $isDedupSheetPresented) {
+            DedupSheet()
+        }
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .mpeg4Movie, .video]
@@ -31,6 +36,21 @@ struct ProbeScreen: View {
             return true
         } isTargeted: { targeted in
             isDropTargeted = targeted
+        }
+        .fileImporter(
+            isPresented: $isDedupImporterPresented,
+            allowedContentTypes: [.movie, .mpeg4Movie, .video],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls) where !urls.isEmpty:
+                isDedupSheetPresented = true
+                store.runDedup(urls: urls)
+            case .failure(let error):
+                print("选择去重文件失败：\(error.localizedDescription)")
+            default:
+                break
+            }
         }
     }
 
@@ -131,6 +151,9 @@ struct ProbeScreen: View {
         HStack(spacing: Theme.Spacing.s2) {
             TextButton(title: "加入转码队列", isEnabled: store.canEnqueue) {
                 store.enqueueToQueue(queueStore)
+            }
+            TextButton(title: "跨文件去重…") {
+                isDedupImporterPresented = true
             }
             TextButton(title: "导出 Markdown") {
                 _ = store.exportMarkdown()
@@ -253,6 +276,19 @@ struct ProbeScreen: View {
                         value: "max/avg = \(String(format: "%.2f", ratio)) → \(deep.isVFR ? "疑似 VFR" : "恒定帧率")"
                     )
                 }
+                if let upscale = store.report?.upscale, upscale.sampledFrames > 0 {
+                    if upscale.suspected {
+                        InspectorRow(
+                            label: "假 4K 检测",
+                            value: "疑似放大（置信度 \(Int(upscale.confidence * 100))%）\(upscale.suggestedLevel.map { " · 建议 \($0)" } ?? "")"
+                        )
+                    } else {
+                        InspectorRow(
+                            label: "假 4K 检测",
+                            value: "未检出放大迹象（置信度 \(Int(upscale.confidence * 100))%）"
+                        )
+                    }
+                }
                 if store.isDeepScanning {
                     Text("深度探测中…")
                         .font(Theme.TextStyle.caption)
@@ -278,5 +314,66 @@ struct ProbeScreen: View {
                 }
             }
         }
+    }
+}
+
+/// 跨文件去重面板（设计文档 §7.14）：指纹计算进度 + 近重复分组结果；仅内存不落盘。
+struct DedupSheet: View {
+    @Environment(ProbeStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s3) {
+            Text("跨文件去重")
+                .font(Theme.TextStyle.section)
+                .foregroundStyle(Theme.textPrimary)
+            Text("感知哈希（pHash）比对同源内容：不同编码 / 尺寸的同一段素材会被归为一组；指纹仅内存现算，不落盘。")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+
+            if store.dedup.isRunning {
+                VStack(alignment: .leading, spacing: Theme.Spacing.s1) {
+                    ProgressView(value: max(store.dedup.progress, 0.02))
+                    Text("计算指纹中…（每片抽 5 帧，约几秒）")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            if let error = store.dedup.errorText {
+                Text(error)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
+            }
+
+            if !store.dedup.groups.isEmpty {
+                ForEach(Array(store.dedup.groups.enumerated()), id: \.offset) { index, group in
+                    VStack(alignment: .leading, spacing: Theme.Spacing.s1) {
+                        Text("第 \(index + 1) 组（\(group.indices.count) 个近重复）")
+                            .font(Theme.TextStyle.caption)
+                            .foregroundStyle(Theme.accent)
+                        ForEach(group.indices, id: \.self) { fingerprintIndex in
+                            if store.dedup.fingerprints.indices.contains(fingerprintIndex) {
+                                Text("· \(store.dedup.fingerprints[fingerprintIndex].fileName)")
+                                    .font(Theme.TextStyle.caption)
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .padding(.leading, 8)
+                            }
+                        }
+                    }
+                }
+            } else if !store.dedup.isRunning, store.dedup.progress >= 1 {
+                Text("未发现近重复文件。")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textPrimary)
+            }
+
+            HStack {
+                Spacer()
+                TextButton(title: "关闭") { dismiss() }
+            }
+        }
+        .padding(Theme.Spacing.s3)
+        .frame(width: 460)
     }
 }

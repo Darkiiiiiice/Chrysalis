@@ -28,6 +28,10 @@ enum ClipFactory {
         /// 写入容器的源元数据（非电影保留用例）。
         var metadata: [AVMetadataItem] = []
         var fileType: AVFileType = .mp4
+        /// 伪高分辨率样本（§7.14）：画面先按此尺寸渲染再放大到 size（模拟放大伪 4K）。
+        var upscaleFrom: CGSize? = nil
+        /// 高细节画面（§7.14 真 4K 标定样本）：强噪点 + 细条纹，模拟真实传感器纹理密度。
+        var detailBoost = false
     }
 
     static func generate(_ spec: Spec) async throws {
@@ -103,7 +107,7 @@ enum ClipFactory {
                 guard let pixelBuffer = makePixelBuffer(pool: adaptor.pixelBufferPool, size: spec.size) else {
                     throw Error(message: "创建像素缓冲失败")
                 }
-                let image = frameImage(t: Double(frame) / Double(spec.fps), size: spec.size)
+                let image = frameImage(t: Double(frame) / Double(spec.fps), size: spec.size, upscaleFrom: spec.upscaleFrom, detailBoost: spec.detailBoost)
                 context.render(
                     image,
                     to: pixelBuffer,
@@ -165,9 +169,21 @@ enum ClipFactory {
 
     // MARK: - 画面（与 P0 相同的合成负载）
 
-    private static func frameImage(t: Double, size: CGSize) -> CIImage {
+    private static func frameImage(t: Double, size: CGSize, upscaleFrom: CGSize? = nil, detailBoost: Bool = false) -> CIImage {
         let rect = CGRect(origin: .zero, size: size)
         let clear = CIImage(color: .clear).cropped(to: rect)
+
+        // 伪高分辨率样本：先按小尺寸渲染（含噪点），再整数比例放大到目标尺寸
+        if let smallSize = upscaleFrom {
+            var small = frameImage(t: t, size: smallSize, upscaleFrom: nil, detailBoost: false)
+            small = small.transformed(
+                by: CGAffineTransform(
+                    scaleX: size.width / smallSize.width,
+                    y: size.height / smallSize.height
+                )
+            )
+            return small.cropped(to: rect)
+        }
 
         let hue = (t * 0.07).truncatingRemainder(dividingBy: 1.0)
         let gradient = CIFilter.linearGradient()
@@ -181,7 +197,7 @@ enum ClipFactory {
         stripes.center = CGPoint(x: rect.midX + cos(t * 1.3) * rect.width * 0.2, y: rect.midY)
         stripes.color0 = CIColor(red: 1, green: 1, blue: 1, alpha: 0.16)
         stripes.color1 = CIColor(red: 0, green: 0, blue: 0, alpha: 0)
-        stripes.width = Float(max(size.width / 36, 2))
+        stripes.width = Float(max(size.width / (detailBoost ? 960 : 36), 2))
         stripes.sharpness = 1.0
         if let stripesImage = stripes.outputImage {
             let rotated = stripesImage.transformed(by: rotationAroundCenter(CGFloat(t * 0.15), center: CGPoint(x: rect.midX, y: rect.midY)))
@@ -209,7 +225,7 @@ enum ClipFactory {
             gray.saturation = 0
             let matrix = CIFilter.colorMatrix()
             matrix.inputImage = gray.outputImage
-            matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: 0.06)
+            matrix.aVector = CIVector(x: 0, y: 0, z: 0, w: detailBoost ? 0.35 : 0.06)
             if let grain = matrix.outputImage {
                 image = grain.cropped(to: rect).composited(over: image)
             }

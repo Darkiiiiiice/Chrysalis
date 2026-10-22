@@ -599,6 +599,66 @@ func runIntegrationTests() async {
             try expect(markdown.contains("关键帧间隔（GOP）"), "含 GOP 行")
             try expect(markdown.contains("moov 前置"), "含 moov 行")
         }
+
+        // 假 4K（§7.14）：真 4K 不检出
+        await h.runAsync("假 4K：真 4K 不检出") {
+            try requireHardwareEncoder()
+            let real4K = try await sourceClip("源-真4k.mp4") { url in
+                var spec = ClipFactory.Spec(
+                    url: url, size: CGSize(width: 3840, height: 2160),
+                    codec: .h264, bitrate: 20_000_000, duration: 2, fps: 24
+                )
+                spec.detailBoost = true
+                return spec
+            }
+            let report = await MediaProbeService.quickReport(url: real4K)
+            let verdict = try await UpscaleDetector.detect(
+                url: real4K, sourceWidth: 3840, sourceHeight: 2160,
+                sourceDuration: report.durationSeconds
+            )
+            try expect(!verdict.suspected, "真 4K 不应检出：\(verdict)")
+        }
+
+        // 假 4K（§7.14）：伪 4K（360p 放大）检出 + 建议档位
+        await h.runAsync("假 4K：伪 4K 检出 + 建议档位") {
+            try requireHardwareEncoder()
+            let fake4K = try await sourceClip("源-伪4k.mp4") { url in
+                var spec = ClipFactory.Spec(
+                    url: url, size: CGSize(width: 3840, height: 2160),
+                    codec: .h264, bitrate: 20_000_000, duration: 2, fps: 24
+                )
+                spec.upscaleFrom = CGSize(width: 640, height: 360)
+                return spec
+            }
+            let report = await MediaProbeService.quickReport(url: fake4K)
+            try expect(report.durationSeconds > 1, "伪 4K 片时长正常：\(report.durationSeconds) verdict=\(report.verdict)")
+            let verdict = try await UpscaleDetector.detect(
+                url: fake4K, sourceWidth: 3840, sourceHeight: 2160,
+                sourceDuration: report.durationSeconds
+            )
+            try expect(verdict.suspected, "伪 4K 应检出：\(verdict)")
+            try expect(verdict.suggestedLevel != nil, "应有建议档位：\(String(describing: verdict.suggestedLevel))")
+        }
+
+        // 去重（§7.14）：同内容不同尺寸（转码产物）互认（16 秒片保证 5 段抽帧）
+        await h.runAsync("去重：同内容不同尺寸互认") {
+            try requireHardwareEncoder()
+            let source720 = try await sourceClip("源-720p-16秒.mp4") { url in
+                ClipFactory.Spec(
+                    url: url, size: CGSize(width: 1280, height: 720),
+                    codec: .h264, bitrate: 3_000_000, duration: 16
+                )
+            }
+            var request = makeRequest(input: source720, output: outputs.appendingPathComponent("out-dedup-480.mp4"), codec: .h264, container: .mp4)
+            request.resolution = .r480
+            let outcome = try await run(request)
+            let original = try await VideoFingerprint.fingerprint(url: source720, fileName: "720", sourceDuration: 16)
+            let downscaled = try await VideoFingerprint.fingerprint(url: outcome.outputURL, fileName: "480", sourceDuration: 16)
+            try expect(original.frameHashes.count == 5, "original 5 帧指纹：\(original.frameHashes.count)")
+            try expect(downscaled.frameHashes.count == 5, "downscaled 5 帧指纹：\(downscaled.frameHashes.count)")
+            try expect(VideoFingerprint.isNearDuplicate(original, downscaled), "同内容不同尺寸应互认")
+            try expect(VideoFingerprint.isNearDuplicate(downscaled, original), "对称互认")
+        }
     }
 
     await h.suite("集成：音频响度标准化（§7.11）") {

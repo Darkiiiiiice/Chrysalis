@@ -73,8 +73,10 @@ struct MediaProbeReport: Codable, Equatable, Sendable {
 
     var deep: SampleStatistics?
     var deepError: String?
-    var quickScannedAt: Date
     var deepScannedAt: Date?
+    /// 假 4K 检测结论（§7.14；深度探测时顺带执行）。
+    var upscale: UpscaleDetector.Verdict?
+    var quickScannedAt: Date
 }
 
 // MARK: - 服务
@@ -107,8 +109,9 @@ enum MediaProbeService {
             metadata: [:],
             deep: nil,
             deepError: nil,
-            quickScannedAt: Date(),
-            deepScannedAt: nil
+            deepScannedAt: nil,
+            upscale: nil,
+            quickScannedAt: Date()
         )
 
         guard exists else {

@@ -334,8 +334,9 @@ func runUnitTests() async {
                 metadata: ["标题": "体检样例"],
                 deep: nil,
                 deepError: nil,
-                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000),
-                deepScannedAt: nil
+                deepScannedAt: nil,
+                upscale: nil,
+                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000)
             )
             let markdown = ProbeReportMarkdown.generate(report)
             try expect(markdown.contains("# 视频体检报告：movie.mkv"), "标题含文件名")
@@ -370,8 +371,9 @@ func runUnitTests() async {
                     gopSizes: nil, isVFR: false, frameIntervalRatio: 1.1, averageFrameInterval: 1.0 / 30
                 ),
                 deepError: nil,
-                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000),
-                deepScannedAt: nil
+                deepScannedAt: nil,
+                upscale: nil,
+                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000)
             )
             let data = try JSONEncoder().encode(report)
             let decoded = try JSONDecoder().decode(MediaProbeReport.self, from: data)
@@ -558,6 +560,85 @@ func runUnitTests() async {
             try expect(ass.contains("[Script Info]"), "Script Info 节")
             try expect(ass.contains("Style: Default,"), "默认样式行")
             try expect(ass.contains("Dialogue: 0,0:00:00.00,0:00:01.50,Default,,0,0,0,,第一行\\N第二行"), "Dialogue 行（\\N 拼接）：\(ass.suffix(200))")
+        }
+    }
+
+    await h.suite("假 4K + 感知哈希（§7.14）") {
+        // 伪随机（LCG）：生成可复现噪声帧
+        func noiseGray(width: Int, height: Int, seed: UInt64) -> [Float] {
+            var state = seed
+            var result = [Float](repeating: 0, count: width * height)
+            for index in 0..<result.count {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                result[index] = Float((state >> 33) % 1000) / 1000.0
+            }
+            return result
+        }
+
+        h.run("residualScore：噪声帧显著高于平滑帧") {
+            let width = 128, height = 128
+            let noisy = noiseGray(width: width, height: height, seed: 42)
+            var smooth = [Float](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    smooth[y * width + x] = Float(x) / Float(width) * 0.5 + 0.25
+                }
+            }
+            let noisyScore = UpscaleDetector.residualScore(gray: noisy, width: width, height: height)
+            let smoothScore = UpscaleDetector.residualScore(gray: smooth, width: width, height: height)
+            try expect(noisyScore > smoothScore * 2, "噪声残差应显著高于平滑：\(noisyScore) vs \(smoothScore)")
+        }
+        h.run("classify：低分疑似 / 高分未检出") {
+            let suspected = UpscaleDetector.classify(score: 0.005)
+            try expectEqual(suspected.suspected, true, "低于阈值应疑似")
+            try expect(suspected.confidence > 0.5, "越低越确信：\(suspected.confidence)")
+            let clear = UpscaleDetector.classify(score: 0.15)
+            try expectEqual(clear.suspected, false, "高于阈值未检出")
+            try expect(clear.confidence > 0.5, "越高越确信：\(clear.confidence)")
+        }
+        h.run("suggestedLevel：档位映射") {
+            try expectEqual(UpscaleDetector.suggestedLevel(forWidth: 3840, forHeight: 2160), "FHD（1080p）或更低", "4K")
+            try expectEqual(UpscaleDetector.suggestedLevel(forWidth: 2560, forHeight: 1440), "HD（720p）", "1440")
+            try expectEqual(UpscaleDetector.suggestedLevel(forWidth: 1920, forHeight: 1080), "HD（720p）/ SD", "1080")
+            try expect(UpscaleDetector.suggestedLevel(forWidth: 1280, forHeight: 720) == nil, "低档位无建议")
+        }
+        h.run("hammingDistance / pHash 稳定性") {
+            try expectEqual(VideoFingerprint.hammingDistance(0, 0), 0, "相同哈希距离 0")
+            try expectEqual(VideoFingerprint.hammingDistance(UInt64.max, 0), 64, "全异距离 64")
+            // 恒定灰度：哈希确定（两次一致）
+            let constant = [Float](repeating: 0.5, count: 64 * 64)
+            let hash1 = VideoFingerprint.pHash(gray: constant, width: 64, height: 64)
+            let hash2 = VideoFingerprint.pHash(gray: constant, width: 64, height: 64)
+            try expectEqual(hash1, hash2, "确定性输出")
+            // 噪声 vs 恒定：距离应大
+            let noisy = noiseGray(width: 64, height: 64, seed: 7)
+            let noiseHash = VideoFingerprint.pHash(gray: noisy, width: 64, height: 64)
+            try expect(VideoFingerprint.hammingDistance(hash1, noiseHash) > 16, "不同画面哈希距离大：\(VideoFingerprint.hammingDistance(hash1, noiseHash))")
+        }
+        h.run("去重分组：链式 A≈B≈C 归一组") {
+            func fingerprint(_ name: String, _ hashes: [UInt64]) -> VideoFingerprint.ClipFingerprint {
+                VideoFingerprint.ClipFingerprint(fileName: name, frameHashes: hashes)
+            }
+            let fingerprints = [
+                fingerprint("A", [0b1111, 0b1111, 0b1111]),
+                fingerprint("B", [0b1110, 0b1110, 0b1110]),   // 距离 1
+                fingerprint("C", [0b1100, 0b1100, 0b1100]),   // 与 B 距离 1（链式）
+                fingerprint("D", [0xF0F0_F0F0_F0F0_F0F0, 0xF0F0_F0F0_F0F0_F0F0, 0xF0F0_F0F0_F0F0_F0F0]),  // 远
+            ]
+            let groups = VideoFingerprint.duplicateGroups(fingerprints: fingerprints)
+            try expectEqual(groups.count, 1, "A/B/C 链式归组、D 独立：\(groups)")
+            try expectEqual(groups.first?.indices, [0, 1, 2], "组内索引排序")
+        }
+        h.run("去重：单文件不分组 / 空指纹跳过") {
+            let single = VideoFingerprint.duplicateGroups(fingerprints: [
+                VideoFingerprint.ClipFingerprint(fileName: "a", frameHashes: [1, 2, 3]),
+            ])
+            try expect(single.isEmpty, "单文件无分组")
+            let empty = VideoFingerprint.duplicateGroups(fingerprints: [
+                VideoFingerprint.ClipFingerprint(fileName: "a", frameHashes: []),
+                VideoFingerprint.ClipFingerprint(fileName: "b", frameHashes: [1, 2, 3]),
+            ])
+            try expect(empty.isEmpty, "空指纹不参与比对")
         }
     }
 

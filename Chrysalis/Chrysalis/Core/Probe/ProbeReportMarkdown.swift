@@ -123,6 +123,27 @@ enum ProbeReportMarkdown {
             lines.append("（未执行；点「深度探测」抽样解码获取码率分布 / 关键帧间隔 / VFR 判定）")
         }
         lines.append("")
+
+        // 假 4K 检测（§7.14）
+        lines.append("## 假 4K 检测")
+        lines.append("")
+        if let upscale = report.upscale, upscale.sampledFrames > 0 {
+            if upscale.suspected {
+                let level = upscale.suggestedLevel.map { "；建议转码档位：\($0)" } ?? ""
+                lines.append(
+                    "- **疑似放大（伪 4K）**：置信度 \(Int(upscale.confidence * 100))%，建议转码选真实分辨率档位\(level)"
+                )
+            } else {
+                lines.append("- 未检出放大迹象：画面高频细节与标称分辨率匹配（置信度 \(Int(upscale.confidence * 100))%）")
+            }
+            lines.append(
+                "- 采样：\(upscale.sampledFrames) 帧，中位残差得分 \(String(format: "%.4f", upscale.medianScore))（阈值 \(String(format: "%.3f", UpscaleDetector.suspectedThreshold))）"
+            )
+            lines.append("- 注：基于采样启发式，仅供参考；低细节内容（动画 / 极简画面）可能误报。")
+        } else {
+            lines.append("（未检测：随深度探测自动执行）")
+        }
+        lines.append("")
         lines.append("---")
         lines.append("由蝉蜕（Chrysalis）生成 · \(Fmt.dateTime(report.quickScannedAt))")
         return lines.joined(separator: "\n")
