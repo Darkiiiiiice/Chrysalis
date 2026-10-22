@@ -6,7 +6,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case presets
     case subtitles
     case probe
-    case audioTools
+    case exportTools
     case history
     case settings
 
@@ -18,7 +18,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .presets: "预设"
         case .subtitles: "字幕"
         case .probe: "体检"
-        case .audioTools: "音频工具"
+        case .exportTools: "导出工具"
         case .history: "历史"
         case .settings: "设置"
         }
@@ -30,7 +30,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .presets: "slider.horizontal.3"
         case .subtitles: "text.quote"
         case .probe: "stethoscope"
-        case .audioTools: "waveform"
+        case .exportTools: "square.and.arrow.down"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
         }

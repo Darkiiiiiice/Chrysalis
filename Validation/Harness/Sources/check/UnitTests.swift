@@ -848,6 +848,40 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("动图与雪碧图（§7.18）") {
+        h.run("GIF 目标帧时间序列：12fps 均匀、短源为空") {
+            let times = AnimatedGIFExporter.targetTimes(durationSeconds: 2.0)
+            try expectEqual(times.count, 24, "2s × 12fps = 24 帧")
+            try expect(abs(times[0] - 0) < 1e-9, "首点 0")
+            try expect(abs(times[1] - times[0] - 2.0 / 24) < 1e-9, "间隔均匀 = 时长/帧数")
+            try expect(AnimatedGIFExporter.targetTimes(durationSeconds: 0.05).isEmpty, "不足一帧间隔为空")
+            try expect(AnimatedGIFExporter.targetTimes(durationSeconds: -1).isEmpty, "无效时长为空")
+            try expect(abs(GifWidth.w360.frameDelay - 1.0 / 12.0) < 1e-9, "帧延时 1/12")
+        }
+        h.run("GIF 规格元数据") {
+            try expectEqual(GifWidth.allCases.map(\.rawValue), [240, 360, 480], "三档宽度")
+            try expectEqual(GifWidth.longClipSeconds, 60.0, "长片提示阈值")
+        }
+        h.run("雪碧图取点：段中点、短源 clamp") {
+            let times = SpriteSheetExporter.sampleTimes(durationSeconds: 2.0, count: 20)
+            try expectEqual(times.count, 20, "20 个时间点")
+            try expect(abs(times[0] - 0.05) < 1e-9, "首点 = 2×0.5/20 = 0.05")
+            try expect(abs(times[19] - 1.95) < 1e-9, "末点 = 2×19.5/20 = 1.95")
+            let clamped = SpriteSheetExporter.sampleTimes(durationSeconds: 0.2, count: 20)
+            try expect(clamped.allSatisfy { $0 >= 0 && $0 <= 0.2 }, "短源不越界")
+            try expect(SpriteSheetExporter.sampleTimes(durationSeconds: 0, count: 20).isEmpty, "零时长为空")
+        }
+        h.run("雪碧图画布几何") {
+            let size = SpriteSheetExporter.canvasSize(sourceWidth: 1920, sourceHeight: 1080, layout: .grid5x4)
+            try expectEqual(size?.width ?? 0, CGFloat(5 * 320), "画布宽 = 列 × 单帧宽")
+            try expect(abs((size?.height ?? 0) - 4.0 * 180.0) < 1, "画布高 = 行 × 180（1080p 等比）")
+            try expect(SpriteSheetExporter.canvasSize(sourceWidth: 0, sourceHeight: 0, layout: .grid5x4) == nil, "非法尺寸 nil")
+            try expectEqual(SpriteLayout.grid5x4.columns * SpriteLayout.grid5x4.rows, 20, "5×4 = 20 帧")
+            try expectEqual(SpriteLayout.grid8x6.columns * SpriteLayout.grid8x6.rows, 48, "8×6 = 48 帧")
+            try expectEqual(SpriteLayout.tileWidth, 320, "单帧宽")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

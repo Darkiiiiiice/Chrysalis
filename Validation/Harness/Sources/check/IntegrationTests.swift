@@ -995,6 +995,54 @@ func runIntegrationTests() async {
             try expect(FileManager.default.fileExists(atPath: first.path), "首文件未被覆盖")
         }
     }
+
+    await h.suite("集成：GIF 与雪碧图（§7.18）") {
+        // GIF：帧数 ≈ 2s × 12fps、宽度 360、无限循环
+        await h.runAsync("GIF 导出：帧数与规格正确") {
+            let output = outputs.appendingPathComponent("export-clip.gif")
+            let final = try await AnimatedGIFExporter.export(url: h264Source, width: .w360, outputURL: output)
+            try expect(FileManager.default.fileExists(atPath: final.path), "输出存在")
+            guard let source = CGImageSourceCreateWithURL(final as CFURL, nil) else {
+                throw TestFailure(message: "GIF 读回失败", file: #filePath, line: #line)
+            }
+            let frameCount = CGImageSourceGetCount(source)
+            try expect(frameCount >= 22 && frameCount <= 26, "帧数 ≈ 24：\(frameCount)")
+            guard let first = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                throw TestFailure(message: "首帧解码失败", file: #filePath, line: #line)
+            }
+            try expectEqual(first.width, 360, "宽度 360")
+            // LoopCount 在文件级属性（帧级只有 DelayTime——ImageIO 写入口径，探针实测）
+            let fileProperties = CGImageSourceCopyProperties(source, nil) as? [CFString: Any]
+            let fileGifDict = fileProperties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+            let loopCount = fileGifDict?[kCGImagePropertyGIFLoopCount] as? Int
+            try expectEqual(loopCount, 0, "无限循环")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 雪碧图：JPEG 尺寸 = 网格 × 单帧
+        await h.runAsync("雪碧图导出：画布尺寸正确") {
+            let output = outputs.appendingPathComponent("sprite-clip.jpg")
+            let final = try await SpriteSheetExporter.export(url: h264Source, layout: .grid5x4, outputURL: output)
+            try expect(FileManager.default.fileExists(atPath: final.path), "输出存在")
+            guard let source = CGImageSourceCreateWithURL(final as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else {
+                throw TestFailure(message: "JPEG 读回失败", file: #filePath, line: #line)
+            }
+            try expectEqual(image.width, 5 * 320, "画布宽 1600")
+            try expectEqual(image.height, 4 * 180, "画布高 720（1080p 等比）")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 重名：雪碧图连续导出不覆盖
+        await h.runAsync("雪碧图重名：连续导出不覆盖") {
+            let output = outputs.appendingPathComponent("sprite-dup.jpg")
+            let first = try await SpriteSheetExporter.export(url: h264Source, layout: .grid5x4, outputURL: output)
+            let second = try await SpriteSheetExporter.export(url: h264Source, layout: .grid5x4, outputURL: output)
+            try expect(first.lastPathComponent == "sprite-dup.jpg", "首取原名：\(first.lastPathComponent)")
+            try expect(second.lastPathComponent == "sprite-dup-1.jpg", "重名 -1：\(second.lastPathComponent)")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

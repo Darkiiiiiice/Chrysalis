@@ -7,7 +7,7 @@ struct ChrysalisApp: App {
     @State private var store = QueueStore()
     @State private var subtitleStore = SubtitleStore()
     @State private var probeStore = ProbeStore()
-    @State private var audioToolsStore = AudioToolsStore()
+    @State private var exportToolsStore = ExportToolsStore()
 
     /// 仅截图辅助用：强制浅色外观（`--capture-light`）。
     private static var forceLightAppearance: Bool {
@@ -20,7 +20,7 @@ struct ChrysalisApp: App {
                 .environment(store)
                 .environment(subtitleStore)
                 .environment(probeStore)
-                .environment(audioToolsStore)
+                .environment(exportToolsStore)
                 .frame(minWidth: 960, minHeight: 620)
                 .tint(Theme.accent)
                 .preferredColorScheme(Self.forceLightAppearance ? .light : nil)
