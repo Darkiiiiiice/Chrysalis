@@ -289,6 +289,9 @@ struct ProbeScreen: View {
                         )
                     }
                 }
+                if let complexity = store.report?.complexity {
+                    complexityBlock(complexity)
+                }
                 if store.isDeepScanning {
                     Text("深度探测中…")
                         .font(Theme.TextStyle.caption)
@@ -313,6 +316,32 @@ struct ProbeScreen: View {
                     Task { await store.runDeepScan() }
                 }
             }
+        }
+    }
+
+    // MARK: 内容复杂度热力图（设计文档 §7.16，灵感 12）
+
+    /// 热力条（每段一色块，强调色不透明度映射综合分）+ 统计 + 分级结论。
+    private func complexityBlock(_ complexity: ComplexityAnalyzer.Report) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s2) {
+            InspectorRow(label: "内容复杂度", value: complexity.level.displayName)
+            // 时间轴热力条：左→右按时间顺序，色块越不透明 = 该段编码难度越高
+            HStack(spacing: 1) {
+                ForEach(Array(complexity.segments.enumerated()), id: \.offset) { _, segment in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Theme.accent.opacity(0.15 + 0.85 * segment.score))
+                        .frame(height: 10)
+                }
+            }
+            if let score = complexity.score {
+                InspectorRow(
+                    label: "综合分分布",
+                    value: "\(String(format: "%.2f", score.min)) ~ \(String(format: "%.2f", score.average))（峰 \(String(format: "%.2f", score.max))，p90 \(String(format: "%.2f", score.p90))）"
+                )
+            }
+            Text(complexity.level.summary)
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
         }
     }
 }

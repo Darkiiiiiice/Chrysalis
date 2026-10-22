@@ -76,6 +76,8 @@ struct MediaProbeReport: Codable, Equatable, Sendable {
     var deepScannedAt: Date?
     /// 假 4K 检测结论（§7.14；深度探测时顺带执行）。
     var upscale: UpscaleDetector.Verdict?
+    /// 内容复杂度热力图（§7.16；深度探测时顺带执行，失败为 nil）。
+    var complexity: ComplexityAnalyzer.Report? = nil
     var quickScannedAt: Date
 }
 
@@ -111,6 +113,7 @@ enum MediaProbeService {
             deepError: nil,
             deepScannedAt: nil,
             upscale: nil,
+            complexity: nil,
             quickScannedAt: Date()
         )
 

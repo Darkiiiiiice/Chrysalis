@@ -702,6 +702,104 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("内容复杂度（ComplexityAnalyzer，§7.16）") {
+        // 确定性伪随机（LCG；避免框架随机数导致断言抖动）
+        func lcg(seed: inout UInt64) -> Float {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Float((seed >> 33) % 1000) / 1000
+        }
+
+        h.run("运动分：静态帧对 ≈ 0、噪声帧对封顶") {
+            let size = 64 * 64
+            let still = [Float](repeating: 0.5, count: size)
+            try expectEqual(ComplexityAnalyzer.motion(first: still, second: still), 0.0, "相同帧对运动分 0")
+            var seed: UInt64 = 0x1234_5678_9ABC_DEF0
+            let noiseA = (0..<size).map { _ in lcg(seed: &seed) }
+            let noiseB = (0..<size).map { _ in lcg(seed: &seed) }
+            let noisy = ComplexityAnalyzer.motion(first: noiseA, second: noiseB)
+            try expect(noisy > 0.9, "独立噪声帧对（均匀分布差均值 ≈ 1/3 > 上限 0.15）应封顶：\(noisy)")
+        }
+        h.run("细节分：纯色 0、线性梯度中等、噪声封顶") {
+            let width = 64
+            let height = 64
+            let flat = [Float](repeating: 0.5, count: width * height)
+            try expectEqual(ComplexityAnalyzer.detail(gray: flat, width: width, height: height), 0.0, "纯色帧细节分 0")
+            // 水平线性渐变：水平相邻差 ≈ 1/63、垂直差 0（同计入口径）→ 均值 (1/63)/2 ≈ 0.00794 → /0.08 ≈ 0.0992
+            let gradient = (0..<height).flatMap { y in (0..<width).map { x in Float(x) / Float(width - 1) } }
+            let gradientScore = ComplexityAnalyzer.detail(gray: gradient, width: width, height: height)
+            try expect(abs(gradientScore - 0.0992) < 0.01, "线性梯度细节分 ≈ 0.0992：\(gradientScore)")
+            var seed: UInt64 = 0xDEAD_BEEF_CAFE_1234
+            let noise = (0..<width * height).map { _ in lcg(seed: &seed) }
+            try expectEqual(ComplexityAnalyzer.detail(gray: noise, width: width, height: height), 1.0, "噪声帧细节分封顶")
+        }
+        h.run("综合分：权重合成与封顶") {
+            try expectEqual(ComplexityAnalyzer.score(motion: 0, detail: 0), 0.0, "零输入")
+            try expect(abs(ComplexityAnalyzer.score(motion: 1, detail: 0) - 0.55) < 1e-9, "纯运动 0.55")
+            try expect(abs(ComplexityAnalyzer.score(motion: 0, detail: 1) - 0.45) < 1e-9, "纯细节 0.45")
+            try expectEqual(ComplexityAnalyzer.score(motion: 2, detail: 2), 1.0, "超界封顶")
+        }
+        h.run("分布统计：min/avg/max/p90 线性插值") {
+            let values = stride(from: 1.0, through: 10.0, by: 1.0).map { $0 }
+            let stats = ComplexityAnalyzer.stats(values)
+            try expectEqual(stats?.min, 1.0, "最小")
+            try expectEqual(stats?.max, 10.0, "最大")
+            try expect(abs((stats?.average ?? 0) - 5.5) < 1e-9, "平均 5.5")
+            try expect(abs((stats?.p90 ?? 0) - 9.1) < 1e-9, "p90 线性插值 9.1")
+            let single = ComplexityAnalyzer.stats([5.0])
+            try expect(abs((single?.p90 ?? 0) - 5.0) < 1e-9, "单值 p90 = 自身")
+            try expect(ComplexityAnalyzer.stats([]) == nil, "空数组返回 nil")
+        }
+        h.run("分级映射：低 / 中 / 高") {
+            try expectEqual(ComplexityAnalyzer.level(averageScore: 0.1), ComplexityAnalyzer.Level.low, "低")
+            try expectEqual(ComplexityAnalyzer.level(averageScore: 0.4), ComplexityAnalyzer.Level.medium, "中")
+            try expectEqual(ComplexityAnalyzer.level(averageScore: 0.8), ComplexityAnalyzer.Level.high, "高")
+            try expect(!ComplexityAnalyzer.Level.low.summary.isEmpty, "各档结论文案非空")
+            try expect(!ComplexityAnalyzer.Level.high.summary.isEmpty, "各档结论文案非空")
+        }
+        h.run("Markdown 生成：复杂度章节与分段表") {
+            let segments = [
+                ComplexityAnalyzer.Segment(start: 0.5, motion: 0.1, detail: 0.2, score: 0.145),
+                ComplexityAnalyzer.Segment(start: 2.1, motion: nil, detail: 0.6, score: 0.6),
+            ]
+            let report = MediaProbeReport(
+                verdict: .ready,
+                verdictMessage: "在支持矩阵内，可以加入转码队列。",
+                fileName: "a.mp4",
+                containerLabel: "MP4",
+                fileSizeBytes: 1024,
+                durationSeconds: 6,
+                createdAt: nil,
+                modifiedAt: nil,
+                video: nil,
+                colorLabel: nil,
+                audioTracks: [],
+                isPlayable: true,
+                isProtected: false,
+                isMoovAtFront: true,
+                metadata: [:],
+                deep: nil,
+                deepError: nil,
+                deepScannedAt: nil,
+                upscale: nil,
+                complexity: ComplexityAnalyzer.Report(
+                    sampledPoints: 2,
+                    motion: ComplexityAnalyzer.Stats(min: 0.1, average: 0.1, max: 0.1, p90: 0.1),
+                    detail: ComplexityAnalyzer.Stats(min: 0.2, average: 0.4, max: 0.6, p90: 0.56),
+                    score: ComplexityAnalyzer.Stats(min: 0.145, average: 0.37, max: 0.6, p90: 0.55),
+                    level: .medium,
+                    segments: segments
+                ),
+                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000)
+            )
+            let markdown = ProbeReportMarkdown.generate(report)
+            try expect(markdown.contains("## 内容复杂度"), "复杂度章节")
+            try expect(markdown.contains("中复杂度"), "分级结论")
+            try expect(markdown.contains("| 00:01 |"), "分段表首行（时间点格式化，0.5s 四舍五入）")
+            try expect(markdown.contains("—"), "运动缺失显示占位符")
+            try expect(markdown.contains("0.55×运动"), "口径注释")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

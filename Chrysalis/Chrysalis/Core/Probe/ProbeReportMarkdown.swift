@@ -144,6 +144,41 @@ enum ProbeReportMarkdown {
             lines.append("（未检测：随深度探测自动执行）")
         }
         lines.append("")
+
+        // 内容复杂度热力图（§7.16）
+        lines.append("## 内容复杂度")
+        lines.append("")
+        if let complexity = report.complexity, !complexity.segments.isEmpty {
+            lines.append("- **\(complexity.level.displayName)复杂度**：\(complexity.level.summary)")
+            if let score = complexity.score {
+                lines.append(
+                    "- 综合分分布：min \(String(format: "%.2f", score.min)) / avg \(String(format: "%.2f", score.average)) / max \(String(format: "%.2f", score.max)) / p90 \(String(format: "%.2f", score.p90))"
+                )
+            }
+            if let motion = complexity.motion {
+                lines.append(
+                    "- 运动分分布：min \(String(format: "%.2f", motion.min)) / avg \(String(format: "%.2f", motion.average)) / max \(String(format: "%.2f", motion.max))"
+                )
+            }
+            if let detail = complexity.detail {
+                lines.append(
+                    "- 细节分分布：min \(String(format: "%.2f", detail.min)) / avg \(String(format: "%.2f", detail.average)) / max \(String(format: "%.2f", detail.max))"
+                )
+            }
+            lines.append("")
+            lines.append("| 时间点 | 运动分 | 细节分 | 综合分 |")
+            lines.append("|---|---|---|---|")
+            for segment in complexity.segments {
+                let motionText = segment.motion.map { String(format: "%.2f", $0) } ?? "—"
+                lines.append(
+                    "| \(Fmt.duration(seconds: segment.start)) | \(motionText) | \(String(format: "%.2f", segment.detail)) | \(String(format: "%.2f", segment.score)) |"
+                )
+            }
+            lines.append("- 注：运动 = 相邻帧差分，细节 = 单帧梯度能量；综合分 = 0.55×运动 + 0.45×细节。")
+        } else {
+            lines.append("（未分析：随深度探测自动执行）")
+        }
+        lines.append("")
         lines.append("---")
         lines.append("由蝉蜕（Chrysalis）生成 · \(Fmt.dateTime(report.quickScannedAt))")
         return lines.joined(separator: "\n")

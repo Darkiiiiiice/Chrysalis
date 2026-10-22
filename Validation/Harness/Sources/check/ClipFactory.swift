@@ -32,6 +32,8 @@ enum ClipFactory {
         var upscaleFrom: CGSize? = nil
         /// 高细节画面（§7.14 真 4K 标定样本）：强噪点 + 细条纹，模拟真实传感器纹理密度。
         var detailBoost = false
+        /// 静态场景（§7.16 复杂度标定）：固定渐变，无移动元素与噪点 → 帧间运动 ≈ 0。
+        var staticScene = false
     }
 
     static func generate(_ spec: Spec) async throws {
@@ -107,7 +109,13 @@ enum ClipFactory {
                 guard let pixelBuffer = makePixelBuffer(pool: adaptor.pixelBufferPool, size: spec.size) else {
                     throw Error(message: "创建像素缓冲失败")
                 }
-                let image = frameImage(t: Double(frame) / Double(spec.fps), size: spec.size, upscaleFrom: spec.upscaleFrom, detailBoost: spec.detailBoost)
+                let image = frameImage(
+                    t: Double(frame) / Double(spec.fps),
+                    size: spec.size,
+                    upscaleFrom: spec.upscaleFrom,
+                    detailBoost: spec.detailBoost,
+                    staticScene: spec.staticScene
+                )
                 context.render(
                     image,
                     to: pixelBuffer,
@@ -169,9 +177,25 @@ enum ClipFactory {
 
     // MARK: - 画面（与 P0 相同的合成负载）
 
-    private static func frameImage(t: Double, size: CGSize, upscaleFrom: CGSize? = nil, detailBoost: Bool = false) -> CIImage {
+    private static func frameImage(
+        t: Double,
+        size: CGSize,
+        upscaleFrom: CGSize? = nil,
+        detailBoost: Bool = false,
+        staticScene: Bool = false
+    ) -> CIImage {
         let rect = CGRect(origin: .zero, size: size)
         let clear = CIImage(color: .clear).cropped(to: rect)
+
+        // 静态场景（§7.16）：固定渐变，所有项与时间无关
+        if staticScene {
+            let gradient = CIFilter.linearGradient()
+            gradient.point0 = CGPoint(x: rect.minX, y: rect.minY)
+            gradient.point1 = CGPoint(x: rect.maxX, y: rect.maxY)
+            gradient.color0 = hslColor(hue: 0.3, saturation: 0.6, brightness: 0.35)
+            gradient.color1 = hslColor(hue: 0.7, saturation: 0.5, brightness: 0.8)
+            return (gradient.outputImage ?? clear).cropped(to: rect)
+        }
 
         // 伪高分辨率样本：先按小尺寸渲染（含噪点），再整数比例放大到目标尺寸
         if let smallSize = upscaleFrom {

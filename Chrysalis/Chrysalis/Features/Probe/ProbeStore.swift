@@ -111,6 +111,15 @@ final class ProbeStore {
                 sourceDuration: self.report?.durationSeconds ?? 0
             )
         }
+
+        // 内容复杂度热力图（§7.16）：深度探测时顺带抽帧分析；失败静默降级（字段保持 nil）
+        if let video = self.report?.video, video.frameRate > 0 {
+            self.report?.complexity = await ComplexityAnalyzer.analyze(
+                url: url,
+                frameRate: video.frameRate,
+                sourceDuration: self.report?.durationSeconds ?? 0
+            )
+        }
     }
 
     /// 结论是否允许加入转码队列（设计文档 §7.10：绿灯才可用）。

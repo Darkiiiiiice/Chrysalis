@@ -886,6 +886,59 @@ func runIntegrationTests() async {
             try expect(peak > 170, "OSD 区域应有亮色文本（灰底 128 + 白字）：peak=\(peak)")
         }
     }
+
+    await h.suite("集成：内容复杂度热力图（§7.16）") {
+        let staticSource = try! await sourceClip("源-静态场景.mp4") { url in
+            ClipFactory.Spec(
+                url: url, size: CGSize(width: 640, height: 360),
+                codec: .h264, bitrate: 2_000_000, duration: 4, fps: 30,
+                staticScene: true
+            )
+        }
+        let busySource = try! await sourceClip("源-高细节场景.mp4") { url in
+            ClipFactory.Spec(
+                url: url, size: CGSize(width: 640, height: 360),
+                codec: .h264, bitrate: 4_000_000, duration: 4, fps: 30,
+                detailBoost: true
+            )
+        }
+
+        // 链路：quickReport → analyze（与 ProbeStore 深度探测同口径）
+        await h.runAsync("分析链路：12 采样点、分数在 [0,1]") {
+            let report = await MediaProbeService.quickReport(url: busySource)
+            try expect((report.video?.frameRate ?? 0) > 0, "帧率读回正常")
+            let complexity = await ComplexityAnalyzer.analyze(
+                url: busySource,
+                frameRate: report.video?.frameRate ?? 30,
+                sourceDuration: report.durationSeconds
+            )
+            try expect(complexity != nil, "复杂度分析有结果")
+            guard let complexity else { return }
+            try expectEqual(complexity.sampledPoints, 12, "12 个采样点")
+            try expectEqual(complexity.segments.count, 12, "12 个分段")
+            for segment in complexity.segments {
+                try expect(segment.detail >= 0 && segment.detail <= 1, "细节分在 [0,1]：\(segment.detail)")
+                try expect(segment.score >= 0 && segment.score <= 1, "综合分在 [0,1]：\(segment.score)")
+                if let motion = segment.motion {
+                    try expect(motion >= 0 && motion <= 1, "运动分在 [0,1]：\(motion)")
+                }
+            }
+            try expect(complexity.segments.contains { $0.motion != nil }, "正常片源应有配对成功的运动分")
+        }
+
+        // 区分度：高细节片 detail 显著高于静态片；静态片运动分接近 0
+        await h.runAsync("区分度：高细节 vs 静态") {
+            let busy = await ComplexityAnalyzer.analyze(url: busySource, frameRate: 30, sourceDuration: 4)
+            let still = await ComplexityAnalyzer.analyze(url: staticSource, frameRate: 30, sourceDuration: 4)
+            try expect(busy != nil && still != nil, "两片分析成功")
+            guard let busy, let still else { return }
+            let busyDetail = busy.detail?.average ?? 0
+            let stillDetail = still.detail?.average ?? 0
+            try expect(busyDetail > stillDetail * 2.0, "高细节片 detail 均值应 ≥ 静态片 2 倍：\(String(format: "%.3f", busyDetail)) vs \(String(format: "%.3f", stillDetail))")
+            let stillMotion = still.motion?.average ?? 1
+            try expect(stillMotion < 0.1, "静态片运动分应接近 0（仅编码噪声）：\(String(format: "%.4f", stillMotion))")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。
