@@ -516,6 +516,51 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("语音转字幕（SpeechTranscriber，§7.13）") {
+        h.run("makeCues：空文本过滤 / 短段过滤 / 时间排序 / 顺序 lineIndex") {
+            let cues = SpeechTranscriber.makeCues(from: [
+                (start: 2.0, duration: 1.0, text: "第二句"),
+                (start: 0.0, duration: 1.5, text: "  第一句  "),
+                (start: 5.0, duration: 0.1, text: "过短"),
+                (start: 3.5, duration: 0.8, text: "   "),
+            ])
+            try expectEqual(cues.count, 2, "空文本与 <0.2s 段被过滤：\(cues.count)")
+            try expectEqual(cues[0].lineIndex, 0, "顺序 lineIndex")
+            try expectEqual(cues[1].lineIndex, 1, "顺序 lineIndex")
+            try expect(cues[0].start < cues[1].start, "按时间排序")
+            try expectEqual(cues[0].lines, ["第一句"], "文本已去首尾空白")
+            try expectEqual(cues[1].end, 3.0, "end = start + duration")
+        }
+        h.run("SRT 时间戳格式") {
+            try expectEqual(SubtitleGenerator.srtTimestamp(0), "00:00:00,000", "零点")
+            try expectEqual(SubtitleGenerator.srtTimestamp(3661.5), "01:01:01,500", "1:01:01.5")
+            try expectEqual(SubtitleGenerator.srtTimestamp(-1), "00:00:00,000", "负值钳到 0")
+        }
+        h.run("ASS 时间戳格式") {
+            try expectEqual(SubtitleGenerator.assTimestamp(0), "0:00:00.00", "零点")
+            try expectEqual(SubtitleGenerator.assTimestamp(3661.5), "1:01:01.50", "百分之一秒")
+        }
+        h.run("SRT 生成：序号 / 箭头行 / 空行分隔") {
+            let cues = [
+                SubtitleCue(lineIndex: 0, start: 0, end: 1.5, lines: ["你好"]),
+                SubtitleCue(lineIndex: 1, start: 2, end: 3.5, lines: ["世界"]),
+            ]
+            let srt = SubtitleGenerator.srt(cues: cues)
+            try expect(srt.contains("00:00:00,000 --> 00:00:01,500"), "箭头行：\(srt.prefix(120))")
+            try expect(srt.contains("你好") && srt.contains("世界"), "包含文本")
+            try expect(srt.hasPrefix("1\n"), "以序号开头")
+        }
+        h.run("ASS 生成：样式表 / Dialogue 行 / 多行 \\N") {
+            let cues = [
+                SubtitleCue(lineIndex: 0, start: 0, end: 1.5, lines: ["第一行", "第二行"]),
+            ]
+            let ass = SubtitleGenerator.ass(cues: cues)
+            try expect(ass.contains("[Script Info]"), "Script Info 节")
+            try expect(ass.contains("Style: Default,"), "默认样式行")
+            try expect(ass.contains("Dialogue: 0,0:00:00.00,0:00:01.50,Default,,0,0,0,,第一行\\N第二行"), "Dialogue 行（\\N 拼接）：\(ass.suffix(200))")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

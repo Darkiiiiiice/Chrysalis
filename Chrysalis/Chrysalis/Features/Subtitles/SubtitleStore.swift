@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import Observation
 
@@ -19,6 +20,8 @@ struct SubtitleItem: Identifiable {
     var errorText: String?
     /// P8.4 内容理解结果（生成后挂载）。
     var insights: SubtitleInsights?
+    /// 语音转字幕产物（设计文档 §7.13）：url 为源视频，导出写 <视频名>.srt/.ass。
+    var isTranscribed = false
 
     var fileName: String { url.lastPathComponent }
 }
@@ -149,5 +152,81 @@ final class SubtitleStore {
         return item.report.issues
             .filter { $0.autoFixable && autoFixableRules.contains($0.rule) }
             .count
+    }
+
+    // MARK: 语音转字幕（设计文档 §7.13）
+
+    /// 设备端识别支持的语言（本机实际可用；UI 选择列表）。
+    let supportedLocales: [Locale] = SpeechTranscriber.supportedLocales()
+
+    private(set) var isTranscribing = false
+    private(set) var transcribeProgress: Double = 0
+    private(set) var transcribeMessage: String?
+
+    /// 对视频执行设备端语音识别；结果作为字幕条目进入列表预览（内存态，导出后才落盘）。
+    func startTranscription(videoURL: URL, locale: Locale) {
+        guard !isTranscribing else { return }
+        isTranscribing = true
+        transcribeProgress = 0
+        transcribeMessage = "准备识别…"
+
+        Task { [weak self] in
+            let asset = AVURLAsset(url: videoURL)
+            let duration = (try? await asset.load(.duration).seconds) ?? 0
+
+            let scoped = videoURL.startAccessingSecurityScopedResource()
+            defer { if scoped { videoURL.stopAccessingSecurityScopedResource() } }
+
+            do {
+                let document = try await SpeechTranscriber.transcribe(
+                    url: videoURL,
+                    locale: locale,
+                    audioDurationSeconds: duration.isFinite ? duration : 0
+                ) { [weak self] value in
+                    Task { @MainActor [weak self] in
+                        self?.transcribeProgress = value
+                    }
+                }
+                guard let self else { return }
+                let report = SubtitleQualityEngine.analyze(document)
+                let item = SubtitleItem(
+                    url: videoURL, originalURL: videoURL,
+                    document: document, report: report, isTranscribed: true
+                )
+                self.items.append(item)
+                self.selection = item.id
+                self.isTranscribing = false
+                self.transcribeMessage = "识别完成：\(document.cues.count) 条字幕，预览确认后导出。"
+            } catch {
+                guard let self else { return }
+                self.isTranscribing = false
+                self.transcribeMessage =
+                    (error as? LocalizedError)?.errorDescription ?? "语音识别失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 导出语音识别结果（SRT / ASS 写源视频目录，重名自动加 -1）。
+    func exportTranscript(itemID: UUID, format: SubtitleFormat) -> URL? {
+        guard let item = items.first(where: { $0.id == itemID }), item.isTranscribed,
+              format == .srt || format == .ass
+        else { return nil }
+        let text = format == .srt
+            ? SubtitleGenerator.srt(cues: item.document.cues)
+            : SubtitleGenerator.ass(cues: item.document.cues)
+        let ext = format == .srt ? "srt" : "ass"
+        let target = OutputPlanner.uniqueOutputURL(
+            directory: item.url.deletingLastPathComponent(),
+            baseName: item.url.deletingPathExtension().lastPathComponent,
+            fileExtension: ext
+        )
+        do {
+            try text.write(to: target, atomically: true, encoding: .utf8)
+            transcribeMessage = "已导出：\(target.lastPathComponent)"
+            return target
+        } catch {
+            transcribeMessage = "导出失败：无法写入源视频所在目录。"
+            return nil
+        }
     }
 }

@@ -632,6 +632,15 @@ func runIntegrationTests() async {
         }
     }
 
+    await h.suite("集成：语音转字幕（§7.13）") {
+        // 设备端支持语言列表可查询（无需识别授权；数量随系统配置）
+        await h.runAsync("设备端支持语言列表可查询") {
+            let locales = SpeechTranscriber.supportedLocales()
+            try expect(!locales.isEmpty, "本机应有至少一个设备端识别语言：\(locales.count)")
+            try expect(locales.allSatisfy { !$0.identifier.isEmpty }, "locale 标识非空")
+        }
+    }
+
     await h.suite("集成：降帧感知帧混合（§7.12）") {
         let source60 = try! await sourceClip("源-60fps-360p.mp4") { url in
             ClipFactory.Spec(

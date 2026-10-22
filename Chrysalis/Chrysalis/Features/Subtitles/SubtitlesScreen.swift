@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 struct SubtitlesScreen: View {
     @Environment(SubtitleStore.self) private var store
     @State private var isImporterPresented = false
+    @State private var isTranscribeImporterPresented = false
+    @State private var isTranscribeSheetPresented = false
+    @State private var transcribeVideoURL: URL?
     @State private var selectedRules: Set<SubtitleRule> = []
     @State private var insightsSession = SubtitleInsightsSession()
     @State private var insightsAvailability: SubtitleInsightAvailability = .deviceUnsupported
@@ -32,6 +35,23 @@ struct SubtitlesScreen: View {
                 store.load(urls: urls)
             case .failure(let error):
                 print("选择字幕失败：\(error.localizedDescription)")
+            }
+        }
+        .fileImporter(
+            isPresented: $isTranscribeImporterPresented,
+            allowedContentTypes: [.movie, .mpeg4Movie, .video]
+        ) { result in
+            switch result {
+            case .success(let url):
+                transcribeVideoURL = url
+                isTranscribeSheetPresented = true
+            case .failure(let error):
+                print("选择视频失败：\(error.localizedDescription)")
+            }
+        }
+        .sheet(isPresented: $isTranscribeSheetPresented) {
+            if let url = transcribeVideoURL {
+                TranscribeSheet(videoURL: url)
             }
         }
         .onAppear {
@@ -63,6 +83,9 @@ struct SubtitlesScreen: View {
                 .font(Theme.TextStyle.caption)
                 .foregroundStyle(Theme.textSecondary)
             Spacer()
+            IconButton(systemImage: "waveform.badge.mic", help: "语音转字幕") {
+                isTranscribeImporterPresented = true
+            }
             IconButton(systemImage: "plus", help: "添加字幕文件") {
                 isImporterPresented = true
             }
@@ -154,12 +177,23 @@ struct SubtitlesScreen: View {
                             .font(Theme.TextStyle.body)
                             .foregroundStyle(Theme.error)
                     } else {
+                        if item.isTranscribed {
+                            transcribedBanner(item)
+                        }
                         overviewSection(item)
                         reportSection(item)
                         fixSection(item)
                         insightsSection(item)
                     }
                     HStack {
+                        if item.isTranscribed {
+                            TextButton(title: "导出 SRT", isEnabled: !item.document.cues.isEmpty) {
+                                exportedPath = store.exportTranscript(itemID: item.id, format: .srt)?.path
+                            }
+                            TextButton(title: "导出 ASS", isEnabled: !item.document.cues.isEmpty) {
+                                exportedPath = store.exportTranscript(itemID: item.id, format: .ass)?.path
+                            }
+                        }
                         TextButton(title: "在 Finder 中显示") {
                             store.revealInFinder(item.url)
                         }
@@ -171,6 +205,20 @@ struct SubtitlesScreen: View {
                 }
                 .padding(Theme.Spacing.s3)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// 语音识别结果条目顶部提示（内存态 + 导出说明）。
+    private func transcribedBanner(_ item: SubtitleItem) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s1) {
+            Label("语音识别结果（设备端处理，未保存到磁盘）——预览确认后导出 SRT / ASS", systemImage: "waveform.badge.mic")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.accent)
+            if item.document.cues.isEmpty {
+                Text("未识别到语音内容：确认音轨含清晰人声，且选择了正确的语言。")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
             }
         }
     }
@@ -362,5 +410,84 @@ private extension SubtitleItem {
 extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// 语音转字幕 Sheet（设计文档 §7.13）：选语言 → 设备端识别进度 → 完成提示。
+struct TranscribeSheet: View {
+    @Environment(SubtitleStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let videoURL: URL
+
+    @State private var selectedLocaleID: String?
+    @State private var hasStarted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s3) {
+            Text("语音转字幕")
+                .font(Theme.TextStyle.section)
+                .foregroundStyle(Theme.textPrimary)
+            Text("\(videoURL.lastPathComponent) · 设备端识别，完全离线")
+                .font(Theme.TextStyle.caption)
+                .foregroundStyle(Theme.textSecondary)
+
+            if store.supportedLocales.isEmpty {
+                Label("本机没有支持设备端识别的语言，无法使用此功能。", systemImage: "exclamationmark.triangle")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.warning)
+            } else if !hasStarted {
+                Picker("识别语言", selection: $selectedLocaleID) {
+                    ForEach(store.supportedLocales, id: \.identifier) { locale in
+                        Text(SpeechTranscriber.displayName(for: locale)).tag(Optional(locale.identifier))
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text("识别耗时约与视频时长相当；嘈杂场景与音乐段落效果有限。")
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            if store.isTranscribing {
+                VStack(alignment: .leading, spacing: Theme.Spacing.s1) {
+                    ProgressView(value: max(store.transcribeProgress, 0.02))
+                    Text("识别中…（进度按已识别到的位置估算）")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            if let message = store.transcribeMessage {
+                Text(message)
+                    .font(Theme.TextStyle.caption)
+                    .foregroundStyle(store.isTranscribing ? Theme.textSecondary : Theme.textPrimary)
+            }
+
+            HStack {
+                Spacer()
+                if !hasStarted {
+                    PrimaryButton(title: "开始识别", isEnabled: selectedLocaleID != nil) {
+                        if let id = selectedLocaleID,
+                           let locale = store.supportedLocales.first(where: { $0.identifier == id }) {
+                            hasStarted = true
+                            store.startTranscription(videoURL: videoURL, locale: locale)
+                        }
+                    }
+                } else {
+                    TextButton(title: store.isTranscribing ? "后台等待" : "完成") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .padding(Theme.Spacing.s3)
+        .frame(width: 440)
+        .onAppear {
+            // 默认语言：系统首选语言与设备端支持列表的匹配（无则取第一个）
+            let preferred = Locale.current.language.languageCode?.identifier
+            selectedLocaleID = store.supportedLocales.first {
+                $0.language.languageCode?.identifier == preferred
+            }?.identifier ?? store.supportedLocales.first?.identifier
+        }
     }
 }
