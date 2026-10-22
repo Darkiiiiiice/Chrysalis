@@ -749,6 +749,143 @@ func runIntegrationTests() async {
             try expect(abs((info.video?.frameRate ?? 0) - 60) < 1.0, "帧率保持 60：\(String(describing: info.video?.frameRate))")
         }
     }
+
+    await h.suite("集成：复古输出彩蛋（§7.15）") {
+        // VHS：转码成功、规格不变、notes 记录
+        await h.runAsync("VHS：转码成功且规格不变") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-vhs.mp4"), codec: .h264, container: .mp4)
+            request.retroEffect = RetroEffectSetting(style: .vhs)
+            let outcome = try await run(request)
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            try expect(outcome.notes.contains { $0.contains("复古输出") }, "notes 记录复古输出：\(outcome.notes)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs(info.durationSeconds - 2.0) < 0.5, "时长不变：\(info.durationSeconds)")
+            try expectEqual(info.video?.displayWidth, 1920, "宽度不变")
+            try expectEqual(info.video?.codecFourCC, "avc1", "编码不变")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 老 DV：转码成功、notes 记录时间戳
+        await h.runAsync("老 DV：转码成功且记录时间戳") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-dv.mp4"), codec: .h264, container: .mp4)
+            request.retroEffect = RetroEffectSetting(style: .dv)
+            let outcome = try await run(request)
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            try expect(outcome.notes.contains { $0.contains("老 DV") }, "notes 记录老 DV：\(outcome.notes)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs(info.durationSeconds - 2.0) < 0.5, "时长不变：\(info.durationSeconds)")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 互斥：复古 + 画质修复 → preparing 失败（引擎兜底）
+        await h.runAsync("互斥：与画质修复同时开启报错") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: h264Source, output: outputs.appendingPathComponent("out-retro-conflict.mp4"), codec: .h264, container: .mp4)
+            request.retroEffect = RetroEffectSetting(style: .vhs)
+            request.enhancement = EnhancementSetting.defaultFilter
+            do {
+                _ = try await run(request)
+                try expect(false, "应抛出互斥错误")
+            } catch let error as TranscodeEngineError {
+                try expect(error == .retroEnhancementConflict, "互斥错误：\(error)")
+            }
+        }
+
+        // VHS 扫描线生效：直接处理测试帧，断言偶/奇行亮度差显著（40 行平均抵消噪点波动）
+        await h.runAsync("VHS 扫描线：处理帧行间亮度差显著") {
+            var pixelBuffer: CVPixelBuffer?
+            let attributes: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault, 640, 360,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &pixelBuffer
+            )
+            try expect(status == kCVReturnSuccess, "测试帧创建成功")
+            guard let source = pixelBuffer else { return }
+            CVPixelBufferLockBaseAddress(source, [])
+            if let base = CVPixelBufferGetBaseAddressOfPlane(source, 0) {
+                memset(base, 128, CVPixelBufferGetBytesPerRowOfPlane(source, 0) * CVPixelBufferGetHeightOfPlane(source, 0))
+            }
+            if let base = CVPixelBufferGetBaseAddressOfPlane(source, 1) {
+                memset(base, 128, CVPixelBufferGetBytesPerRowOfPlane(source, 1) * CVPixelBufferGetHeightOfPlane(source, 1))
+            }
+            CVPixelBufferUnlockBaseAddress(source, [])
+
+            let filter = RetroFilter(
+                style: .vhs, width: 640, height: 360,
+                pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                osdBaseDate: nil
+            )
+            let processed = try filter.process(pixelBuffer: source, pts: 1.0)
+
+            CVPixelBufferLockBaseAddress(processed, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(processed, .readOnly) }
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(processed, 0)
+            let base = CVPixelBufferGetBaseAddressOfPlane(processed, 0)!
+            func rowAverage(_ y: Int) -> Double {
+                let row = base.advanced(by: y * stride)
+                var sum = 0
+                for x in 0..<640 { sum += Int(row.load(fromByteOffset: x, as: UInt8.self)) }
+                return Double(sum) / 640
+            }
+            var evenSum = 0.0
+            var oddSum = 0.0
+            for y in 40..<80 {
+                let value = rowAverage(y)
+                if y % 2 == 0 { evenSum += value } else { oddSum += value }
+            }
+            let even = evenSum / 20
+            let odd = oddSum / 20
+            try expect(abs(even - odd) > 2.0, "偶/奇行均值差应显著（扫描线）：even=\(String(format: "%.1f", even)) odd=\(String(format: "%.1f", odd))")
+        }
+
+        // 老 DV OSD 生效：处理帧右上角区域出现文本亮块（灰底 + 白字 → 亮度抬升）
+        await h.runAsync("老 DV OSD：右上角出现文本亮块") {
+            var pixelBuffer: CVPixelBuffer?
+            let attributes: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault, 640, 360,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &pixelBuffer
+            )
+            try expect(status == kCVReturnSuccess, "测试帧创建成功")
+            guard let source = pixelBuffer else { return }
+            CVPixelBufferLockBaseAddress(source, [])
+            if let base = CVPixelBufferGetBaseAddressOfPlane(source, 0) {
+                memset(base, 128, CVPixelBufferGetBytesPerRowOfPlane(source, 0) * CVPixelBufferGetHeightOfPlane(source, 0))
+            }
+            if let base = CVPixelBufferGetBaseAddressOfPlane(source, 1) {
+                memset(base, 128, CVPixelBufferGetBytesPerRowOfPlane(source, 1) * CVPixelBufferGetHeightOfPlane(source, 1))
+            }
+            CVPixelBufferUnlockBaseAddress(source, [])
+
+            let filter = RetroFilter(
+                style: .dv, width: 640, height: 360,
+                pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                osdBaseDate: Date(timeIntervalSince1970: 1_792_636_800)
+            )
+            let processed = try filter.process(pixelBuffer: source, pts: 1.0)
+
+            CVPixelBufferLockBaseAddress(processed, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(processed, .readOnly) }
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(processed, 0)
+            let base = CVPixelBufferGetBaseAddressOfPlane(processed, 0)!
+            // OSD 区域：右上角 margin 4% ≈ 26px，文本块约 250×60；采样 (300..614, 24..84)
+            func regionMax() -> UInt8 {
+                var maxValue: UInt8 = 0
+                for y in 24..<84 {
+                    let row = base.advanced(by: y * stride)
+                    for x in 300..<614 {
+                        let value = row.load(fromByteOffset: x, as: UInt8.self)
+                        if value > maxValue { maxValue = value }
+                    }
+                }
+                return maxValue
+            }
+            let peak = regionMax()
+            try expect(peak > 170, "OSD 区域应有亮色文本（灰底 128 + 白字）：peak=\(peak)")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

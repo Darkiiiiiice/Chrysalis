@@ -73,6 +73,8 @@ struct QueueArchive: Codable {
         var loudness: LoudnessSetting?
         /// 降帧感知混合（§7.12）；旧队列文件没有该字段，缺省即关闭。
         var frameBlending: Bool?
+        /// 复古输出彩蛋（§7.15）；旧队列文件没有该字段，缺省即关闭。
+        var retroEffect: RetroEffectSetting?
 
         init(_ job: TranscodeJob) {
             self.id = job.id
@@ -93,6 +95,7 @@ struct QueueArchive: Codable {
             self.probeResult = job.probeResult
             self.loudness = job.loudness
             self.frameBlending = job.frameBlending
+            self.retroEffect = job.retroEffect
         }
     }
 

@@ -160,6 +160,10 @@ actor TranscodeEngine {
         if request.enhancement != nil, request.resolution != .source {
             throw TranscodeEngineError.enhancementResolutionConflict
         }
+        // 复古输出（设计文档 §7.15）：与画质修复互斥（UI 已双向禁用，此处引擎兜底）
+        if request.enhancement != nil, request.retroEffect != nil {
+            throw TranscodeEngineError.retroEnhancementConflict
+        }
         let renderSize: CGSize
         if request.enhancement != nil {
             renderSize = CGSize(width: sourceSize.width * 2, height: sourceSize.height * 2)
@@ -439,6 +443,31 @@ actor TranscodeEngine {
             blender = nil
         }
 
+        // 复古输出滤镜（设计文档 §7.15）：占据画质修复插槽（两者互斥），在混合器之后、写入端之前
+        let retro: RetroFilter?
+        if let setting = request.retroEffect {
+            var osdBaseDate: Date?
+            if setting.style == .dv {
+                // DV 时间戳基准（§7.15）：源创建时间 → 文件修改时间；均无则不叠加
+                let attrs = try? FileManager.default.attributesOfItem(atPath: request.inputURL.path)
+                osdBaseDate = (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
+                if osdBaseDate == nil {
+                    notes.append("未找到源创建时间，未叠加时间戳")
+                }
+            }
+            let inputSize = needsComposition ? geometrySize : sourceSize
+            retro = RetroFilter(
+                style: setting.style,
+                width: max(Int(inputSize.width), 2),
+                height: max(Int(inputSize.height), 2),
+                pixelFormat: readerPixelFormat,
+                osdBaseDate: osdBaseDate
+            )
+            notes.append(setting.notesText)
+        } else {
+            retro = nil
+        }
+
         // MARK: 写入端
         let tempURL = OutputPlanner.makeTempURL(in: outputDirectory)
         let writer: AVAssetWriter
@@ -571,9 +600,30 @@ actor TranscodeEngine {
 
         do {
             let finalStats = try await withThrowingTaskGroup(of: PumpStats.self) { group in
-                // 混合输出帧 → [增强] → 写入（局部辅助，混用与冲刷共用）
+                // 复古滤镜应用（设计文档 §7.15）：帧 → 风格化帧；PTS 用于噪点相位与 DV 时钟
+                func applyRetro(
+                    _ sample: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>,
+                    failureContext: String
+                ) throws -> CMReadySampleBuffer<CMSampleBuffer.DynamicContent> {
+                    guard let retro else { return sample }
+                    guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(sample) else {
+                        throw TranscodeEngineError.readWriteFailed("\(failureContext)不是像素内容，无法应用复古滤镜")
+                    }
+                    let pts = sample.presentationTimeStamp.seconds
+                    return try readOnly.content.withUnsafeBuffer { inputBuffer in
+                        let processed = try retro.process(pixelBuffer: inputBuffer, pts: pts)
+                        let frame = CMReadySampleBuffer(
+                            pixelBuffer: CVReadOnlyPixelBuffer(unsafeBuffer: processed),
+                            presentationTimeStamp: sample.presentationTimeStamp,
+                            duration: sample.duration
+                        )
+                        return CMReadySampleBuffer(frame)
+                    }
+                }
+
+                // 混合输出帧 → [复古滤镜] → [增强] → 写入（局部辅助，混用与冲刷共用）
                 func emitBlended(_ sample: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>) async throws {
-                    var outgoing = sample
+                    var outgoing = try applyRetro(sample, failureContext: "混合输出帧")
                     if let enhancer {
                         guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(sample) else {
                             throw TranscodeEngineError.readWriteFailed("混合输出帧不是像素内容，无法增强")
@@ -641,8 +691,8 @@ actor TranscodeEngine {
                             continue
                         }
 
-                        // 画质修复层（设计文档 §7.6）：源帧 → 2x 帧；时间戳与音频直通不变
-                        var outgoing = ready
+                        // 复古滤镜（设计文档 §7.15）→ 画质修复层（设计文档 §7.6）：时间戳与音频直通不变
+                        var outgoing = try applyRetro(ready, failureContext: "视频帧")
                         if let enhancer {
                             guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(ready) else {
                                 throw TranscodeEngineError.readWriteFailed("视频帧不是像素内容，无法增强")

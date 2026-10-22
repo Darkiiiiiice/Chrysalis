@@ -56,6 +56,8 @@ struct TranscodeRequest: Sendable {
     var loudness: LoudnessSetting? = nil
     /// 降帧感知混合（设计文档 §7.12）：降帧时窗口内源帧按时间位置加权混合，默认关闭。
     var frameBlending = false
+    /// 复古输出彩蛋（设计文档 §7.15）；nil = 关闭（默认）。与画质修复互斥。
+    var retroEffect: RetroEffectSetting? = nil
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。
@@ -98,6 +100,8 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
     case enhancementUnavailable(String)
     /// 画质修复分辨率与「保持源」锁定冲突。
     case enhancementResolutionConflict
+    /// 复古输出与画质修复互斥（设计文档 §7.15，引擎兜底；UI 已双向禁用）。
+    case retroEnhancementConflict
     /// 目标编码器不支持 8K 输出（不静默降级）。
     case eightKUnsupported(codec: String, width: Int, height: Int)
     case failed(String)
@@ -134,6 +138,8 @@ enum TranscodeEngineError: LocalizedError, Sendable, Equatable {
             "画质修复不可用：\(message)"
         case .enhancementResolutionConflict:
             "画质修复开启时输出固定为源尺寸 ×2；请把分辨率档位切回「保持源」。"
+        case .retroEnhancementConflict:
+            "复古输出与画质修复互斥：请只保留其一。"
         case .eightKUnsupported(let codec, let width, let height):
             "当前 \(codec) 硬件编码器不支持 \(width)×\(height)（8K）输出：请改用 4K 源或关闭画质修复；不会静默降到 4K。"
         case .failed(let message):

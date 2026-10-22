@@ -26,6 +26,7 @@ struct InspectorView: View {
                         enhancementSection(job)
                         loudnessSection(job)
                         frameBlendingSection(job)
+                        retroSection(job)
                         hardwareSection(job)
                         errorSection(job)
                     }
@@ -408,9 +409,63 @@ struct InspectorView: View {
         return job.preset.frameRate.effectiveFrameRate(sourceFPS: video.frameRate) < video.frameRate - 0.01
     }
 
+    // MARK: 复古输出（设计文档 §7.15）
+
+    /// 复古输出分区：排队中可编辑（开关 + 风格二选一）；与画质修复互斥。
+    @ViewBuilder
+    private func retroSection(_ job: TranscodeJob) -> some View {
+        InspectorSection(title: "复古输出") {
+            if job.state == .queued {
+                Toggle("开启", isOn: Binding(
+                    get: { job.retroEffect != nil },
+                    set: { enabled in
+                        store.setRetroEffect(
+                            enabled ? (job.retroEffect ?? RetroEffectSetting()) : nil,
+                            jobID: job.id
+                        )
+                    }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(Theme.TextStyle.body)
+                .disabled(job.enhancement != nil)
+
+                if let setting = job.retroEffect {
+                    Picker("风格", selection: Binding(
+                        get: { setting.style },
+                        set: { newValue in
+                            var updated = setting
+                            updated.style = newValue
+                            store.setRetroEffect(updated, jobID: job.id)
+                        }
+                    )) {
+                        ForEach(RetroEffectStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Text(setting.style.summary)
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                } else if job.enhancement != nil {
+                    Text("与画质修复互斥：请先关闭画质修复。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    Text("把输出做成 VHS 磁带或老 DV 的复古观感；仅改画面，音频不变。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else {
+                InspectorRow(label: "复古输出", value: job.retroEffect?.style.displayName ?? "关闭")
+            }
+        }
+    }
+
     // MARK: 画质修复（设计文档 §7.6 / §8）
 
-    /// 画质修复分区：排队中可编辑；运行后只读展示。
+    /// 画质修复分区：排队中可编辑；运行后只读展示。与复古输出互斥（§7.15）。
     @ViewBuilder
     private func enhancementSection(_ job: TranscodeJob) -> some View {
         InspectorSection(title: "画质修复") {
@@ -428,10 +483,15 @@ struct InspectorView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .font(Theme.TextStyle.body)
+                    .disabled(job.retroEffect != nil)
                     Spacer()
                 }
 
-                if let setting = job.enhancement {
+                if job.enhancement == nil, job.retroEffect != nil {
+                    Text("与复古输出互斥：请先关闭复古输出。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                } else if let setting = job.enhancement {
                     HStack(spacing: Theme.Spacing.s2) {
                         Picker("模式", selection: Binding(
                             get: { setting.mode },

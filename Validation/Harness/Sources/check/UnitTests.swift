@@ -642,6 +642,66 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("复古输出（RetroFilter，§7.15）") {
+        h.run("设置 Codable 往返") {
+            for style in RetroEffectStyle.allCases {
+                let setting = RetroEffectSetting(style: style)
+                let data = try JSONEncoder().encode(setting)
+                let decoded = try JSONDecoder().decode(RetroEffectSetting.self, from: data)
+                try expectEqual(decoded, setting, "\(style) 往返一致")
+            }
+        }
+        h.run("OSD 文案格式（DV 取景器风格）") {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+            var components = DateComponents()
+            components.year = 2026
+            components.month = 10
+            components.day = 22
+            components.hour = 20
+            components.minute = 15
+            let date = calendar.date(from: components)!
+            let lines = RetroFilter.osdLines(for: date, calendar: calendar)
+            try expectEqual(lines.top, "OCT.22 2026", "上行日期")
+            try expectEqual(lines.bottom, "PM 8:15", "下行时间")
+            components.hour = 0
+            components.minute = 5
+            let midnight = calendar.date(from: components)!
+            try expectEqual(RetroFilter.osdLines(for: midnight, calendar: calendar).bottom, "AM 12:05", "零点归 12")
+            components.hour = 12
+            components.minute = 0
+            let noon = calendar.date(from: components)!
+            try expectEqual(RetroFilter.osdLines(for: noon, calendar: calendar).bottom, "PM 12:00", "正午归 12")
+        }
+        h.run("OSD 时间随播放进度递增") {
+            let base = Date(timeIntervalSince1970: 1_792_636_800)
+            try expect(RetroFilter.osdDate(base: base, pts: 90) == base.addingTimeInterval(90), "PTS 90 秒对应 +90s")
+            try expect(RetroFilter.osdDate(base: base, pts: -5) == base, "负 PTS 不回拨时钟")
+        }
+        h.run("噪点相位确定性") {
+            let a = RetroFilter.noisePhase(pts: 3.5)
+            let b = RetroFilter.noisePhase(pts: 3.5)
+            try expectEqual(a.x, b.x, "同 PTS 同 X 相位")
+            try expectEqual(a.y, b.y, "同 PTS 同 Y 相位")
+            let c = RetroFilter.noisePhase(pts: 4.5)
+            try expect(a.x != c.x || a.y != c.y, "不同 PTS 相位漂移")
+        }
+        h.run("OSD 渲染产出非空透明图") {
+            guard let image = RetroFilter.renderOSDImage(top: "OCT.22 2026", bottom: "PM 8:15", fontSize: 18) else {
+                throw TestFailure(message: "OSD 渲染失败", file: #filePath, line: #line)
+            }
+            try expect(image.extent.width > 0, "宽度非零：\(image.extent.width)")
+            try expect(image.extent.height > 0, "高度非零：\(image.extent.height)")
+        }
+        h.run("风格展示文案完整") {
+            for style in RetroEffectStyle.allCases {
+                try expect(!style.displayName.isEmpty, "\(style) displayName 非空")
+                try expect(!style.summary.isEmpty, "\(style) summary 非空")
+                try expect(!RetroEffectSetting(style: style).notesText.isEmpty, "\(style) notesText 非空")
+            }
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

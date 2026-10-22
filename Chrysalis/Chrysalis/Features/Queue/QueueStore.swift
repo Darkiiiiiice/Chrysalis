@@ -504,7 +504,8 @@ final class QueueStore {
             enhancement: job.enhancement,
             measuredTotalBitrate: measuredTotalBitrate,
             loudness: job.loudness,
-            frameBlending: job.frameBlending
+            frameBlending: job.frameBlending,
+            retroEffect: job.retroEffect
         )
     }
 
@@ -799,6 +800,15 @@ final class QueueStore {
         saveQueue()
     }
 
+    /// 单任务复古输出（设计文档 §7.15）：仅排队中的任务可改；nil 关闭。与画质修复互斥（UI 双向禁用）。
+    func setRetroEffect(_ setting: RetroEffectSetting?, jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .queued else { return }
+        guard jobs[index].retroEffect != setting else { return }
+        jobs[index].retroEffect = setting
+        saveQueue()
+    }
+
     /// 自动匹配的最高分候选摘要（队列行 / 检查器直接展示，不必点开确认窗口）。
     func matchedSummary(jobID: UUID) -> TMDBMovieSummary? {
         movieCandidates[jobID]?.first?.summary
@@ -1049,6 +1059,7 @@ final class QueueStore {
             job.probeResult = persisted.probeResult
             job.loudness = persisted.loudness
             job.frameBlending = persisted.frameBlending ?? false
+            job.retroEffect = persisted.retroEffect
             job.state = persisted.state.restoredState
             if job.state == .interrupted {
                 interruptedCount += 1
