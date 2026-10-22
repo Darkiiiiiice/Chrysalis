@@ -800,6 +800,54 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("音频提取（AudioExtractor，§7.17）") {
+        h.run("格式元数据与 AAC 码率") {
+            try expectEqual(AudioExportFormat.m4a.fileExtension, "m4a", "M4A 扩展名")
+            try expectEqual(AudioExportFormat.wav.fileExtension, "wav", "WAV 扩展名")
+            try expectEqual(AudioExportFormat.m4a.avFileType, AVFileType.m4a, "M4A 容器")
+            try expectEqual(AudioExportFormat.wav.avFileType, AVFileType.wav, "WAV 容器")
+            try expectEqual(AudioExportFormat.m4a.aacBitrate(channels: 2), 192_000, "双声道 192k")
+            try expectEqual(AudioExportFormat.m4a.aacBitrate(channels: 6), 512_000, "6 声道封顶 512k")
+        }
+        h.run("波形分桶：幅度归桶 min/max 正确") {
+            var envelope = WaveformEnvelope(
+                durationSeconds: 1,
+                minima: [Float](repeating: 1, count: WaveformEnvelope.bucketCount),
+                maxima: [Float](repeating: 0, count: WaveformEnvelope.bucketCount)
+            )
+            // 480 帧 @ 48 kHz = 0.01 s = 6 桶；双声道交替幅度 0.5 / -0.25
+            let samples = (0..<480).flatMap { _ in [Float(0.5), Float(-0.25)] }
+            samples.withUnsafeBufferPointer { pointer in
+                AudioExtractor.updateEnvelope(
+                    &envelope,
+                    bucketWidth: 1.0 / 600.0,
+                    bufferPTS: 0,
+                    sampleRate: 48_000,
+                    frames: 480,
+                    channels: 2,
+                    samples: pointer.baseAddress!
+                )
+            }
+            let touched = (0..<WaveformEnvelope.bucketCount).filter { envelope.maxima[$0] > 0 }
+            try expectEqual(touched.count, 6, "0.01 秒覆盖 6 桶")
+            try expect(abs(envelope.maxima[0] - 0.5) < 1e-6, "峰值 0.5")
+            try expect(abs(envelope.minima[0] - 0.25) < 1e-6, "最小幅度 0.25")
+            try expectEqual(envelope.maxima[10], Float(0), "未覆盖桶仍 0")
+            AudioExtractor.normalizeSilentBuckets(&envelope)
+            try expectEqual(envelope.minima[10], Float(0), "静音桶 min 归 0")
+            try expect(!envelope.isSilent, "有内容非静音")
+        }
+        h.run("波形静音判定") {
+            var envelope = WaveformEnvelope(
+                durationSeconds: 1,
+                minima: [Float](repeating: 1, count: WaveformEnvelope.bucketCount),
+                maxima: [Float](repeating: 0, count: WaveformEnvelope.bucketCount)
+            )
+            AudioExtractor.normalizeSilentBuckets(&envelope)
+            try expect(envelope.isSilent, "全零 maxima 判静音")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

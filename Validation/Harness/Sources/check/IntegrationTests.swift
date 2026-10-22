@@ -939,6 +939,62 @@ func runIntegrationTests() async {
             try expect(stillMotion < 0.1, "静态片运动分应接近 0（仅编码噪声）：\(String(format: "%.4f", stillMotion))")
         }
     }
+
+    await h.suite("集成：音频提取（§7.17）") {
+        // 波形分析：轨道信息正确、正弦包络非全零
+        await h.runAsync("波形分析：非全零且轨道信息正确") {
+            let analysis = try await AudioExtractor.analyze(url: h264Source)
+            try expect(analysis != nil, "有音轨片分析成功")
+            guard let analysis else { return }
+            try expectEqual(analysis.channels, 2, "立体声")
+            try expect(abs(analysis.sampleRate - 48_000) < 1, "48 kHz")
+            try expect(abs(analysis.durationSeconds - 2.0) < 0.3, "时长 ≈ 2s：\(analysis.durationSeconds)")
+            try expect(!analysis.envelope.isSilent, "正弦非静音")
+            let peak = analysis.envelope.maxima.max() ?? 0
+            try expect(peak > 0.15, "0.25 幅度正弦峰值应 > 0.15：\(peak)")
+        }
+
+        await h.runAsync("无音轨片返回 nil") {
+            let analysis = try await AudioExtractor.analyze(url: silentSource)
+            try expect(analysis == nil, "无音轨返回 nil")
+        }
+
+        // M4A：AAC 编码、时长一致、无视频轨（不走 MediaInspector.inspect——那是转码输入矩阵，不含音频容器）
+        await h.runAsync("提取 M4A：读回 AAC、时长一致") {
+            let output = outputs.appendingPathComponent("extract-audio.m4a")
+            let final = try await AudioExtractor.extract(url: h264Source, format: .m4a, outputURL: output)
+            try expect(FileManager.default.fileExists(atPath: final.path), "输出存在")
+            let fourCC = try await OutputProbe.audioFourCC(of: final)
+            try expectEqual(fourCC.trimmingCharacters(in: .whitespaces), "aac", "AAC 编码")
+            let asset = AVURLAsset(url: final)
+            let duration = (try await asset.load(.duration)).seconds
+            try expect(abs(duration - 2.0) < 0.4, "时长 ≈ 源：\(duration)")
+            let tracks = try await asset.load(.tracks)
+            try expect(tracks.allSatisfy { $0.mediaType != .video }, "无视频轨")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // WAV：LPCM 16-bit
+        await h.runAsync("提取 WAV：读回 PCM 16-bit") {
+            let output = outputs.appendingPathComponent("extract-audio.wav")
+            let final = try await AudioExtractor.extract(url: h264Source, format: .wav, outputURL: output)
+            let fourCC = try await OutputProbe.audioFourCC(of: final)
+            try expectEqual(fourCC.trimmingCharacters(in: .whitespaces), "lpcm", "LPCM")
+            let depth = try await OutputProbe.pcmBitDepth(of: final)
+            try expectEqual(depth, 16, "16-bit PCM")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 重名：连续提取同格式不覆盖（-1 后缀）
+        await h.runAsync("重名：连续提取同格式不覆盖") {
+            let output = outputs.appendingPathComponent("extract-dup.m4a")
+            let first = try await AudioExtractor.extract(url: h264Source, format: .m4a, outputURL: output)
+            let second = try await AudioExtractor.extract(url: h264Source, format: .m4a, outputURL: output)
+            try expect(first.lastPathComponent == "extract-dup.m4a", "首取原名：\(first.lastPathComponent)")
+            try expect(second.lastPathComponent == "extract-dup-1.m4a", "重名 -1：\(second.lastPathComponent)")
+            try expect(FileManager.default.fileExists(atPath: first.path), "首文件未被覆盖")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

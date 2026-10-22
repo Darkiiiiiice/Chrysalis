@@ -89,6 +89,8 @@ struct QueueScreen: View {
             SubtitlesScreen()
         case .probe:
             ProbeScreen()
+        case .audioTools:
+            AudioToolsScreen()
         case .history:
             HistoryScreen()
         case .settings:
