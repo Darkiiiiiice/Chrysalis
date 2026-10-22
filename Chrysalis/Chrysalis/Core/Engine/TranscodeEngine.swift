@@ -172,14 +172,18 @@ actor TranscodeEngine {
         // 合成慢路径只负责几何（旋转/偶数对齐/几何缩放），不做画质修复的 2x——那是增强层的职责
         let geometrySize = request.enhancement != nil ? sourceSize : renderSize
         let outputFPS = request.frameRate.effectiveFrameRate(sourceFPS: mediaFPS)
+        var notes: [String] = []
         var compositionReasons: [String] = []
         if preferredTransform != .identity { compositionReasons.append("旋转") }
         if oriented != sourceSize { compositionReasons.append("偶数对齐") }
         if geometrySize != sourceSize { compositionReasons.append("缩放") }
-        if abs(outputFPS - mediaFPS) > 0.01 { compositionReasons.append("帧率") }
+        // 降帧混合（设计文档 §7.12）：帧率由泵内混合器处理，不触发合成慢路径
+        let frameBlendingActive = request.frameBlending && outputFPS < mediaFPS - 0.01
+        if abs(outputFPS - mediaFPS) > 0.01, !frameBlendingActive { compositionReasons.append("帧率") }
+        if frameBlendingActive {
+            notes.append("已启用降帧混合（\(Int(mediaFPS.rounded())) → \(Int(outputFPS.rounded())) fps）")
+        }
         let needsComposition = !compositionReasons.isEmpty
-
-        var notes: [String] = []
 
         // MARK: 读取端
         let reader: AVAssetReader
@@ -217,7 +221,9 @@ actor TranscodeEngine {
             let instruction = AVVideoCompositionInstruction(configuration: instructionConfiguration)
             var compositionConfiguration = AVVideoComposition.Configuration()
             compositionConfiguration.renderSize = geometrySize
-            compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(outputFPS.rounded(), 1)))
+            // 降帧混合（§7.12）：composition 输出源帧率（不丢帧），降帧由泵内混合器完成
+            let compositionFPS = frameBlendingActive ? mediaFPS : outputFPS
+            compositionConfiguration.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(compositionFPS.rounded(), 1)))
             compositionConfiguration.instructions = [instruction]
             let composition = AVVideoComposition(configuration: compositionConfiguration)
 
@@ -418,6 +424,21 @@ actor TranscodeEngine {
             enhancer = nil
         }
 
+        // 降帧感知混合器（设计文档 §7.12）：混合在增强前（源分辨率，输出帧少省增强算力）
+        let blender: FrameBlender?
+        if frameBlendingActive {
+            let inputSize = needsComposition ? geometrySize : sourceSize
+            blender = FrameBlender(
+                outputFPS: outputFPS,
+                sourceFPS: mediaFPS,
+                width: max(Int(inputSize.width), 2),
+                height: max(Int(inputSize.height), 2),
+                pixelFormat: readerPixelFormat
+            )
+        } else {
+            blender = nil
+        }
+
         // MARK: 写入端
         let tempURL = OutputPlanner.makeTempURL(in: outputDirectory)
         let writer: AVAssetWriter
@@ -550,6 +571,26 @@ actor TranscodeEngine {
 
         do {
             let finalStats = try await withThrowingTaskGroup(of: PumpStats.self) { group in
+                // 混合输出帧 → [增强] → 写入（局部辅助，混用与冲刷共用）
+                func emitBlended(_ sample: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>) async throws {
+                    var outgoing = sample
+                    if let enhancer {
+                        guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(sample) else {
+                            throw TranscodeEngineError.readWriteFailed("混合输出帧不是像素内容，无法增强")
+                        }
+                        outgoing = try readOnly.content.withUnsafeBuffer { inputBuffer in
+                            let enhanced = try enhancer.enhance(inputBuffer)
+                            let frame = CMReadySampleBuffer(
+                                pixelBuffer: enhanced,
+                                presentationTimeStamp: sample.presentationTimeStamp,
+                                duration: sample.duration
+                            )
+                            return CMReadySampleBuffer(frame)
+                        }
+                    }
+                    try await videoReceiver.append(outgoing)
+                }
+
                 group.addTask {
                     var stats = PumpStats()
                     var lastReport = started
@@ -563,6 +604,43 @@ actor TranscodeEngine {
                         }
                         guard let ready else { break }
                         if Task.isCancelled || cancelFlag.isCancelled { throw TranscodeEngineError.cancelled }
+
+                        if let blender {
+                            // 帧混合分支（设计文档 §7.12）：源帧进混合器，输出 0..n 帧；混合在增强前
+                            guard let readOnly = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(ready) else {
+                                throw TranscodeEngineError.readWriteFailed("视频帧不是像素内容，无法混合")
+                            }
+                            let srcPts = ready.presentationTimeStamp.seconds
+                            let outputs = try readOnly.content.withUnsafeBuffer { inputPixelBuffer in
+                                try blender.ingest(pts: srcPts, source: inputPixelBuffer)
+                            }
+                            for sample in outputs {
+                                try await emitBlended(sample)
+                            }
+                            stats.frames += 1
+                            if srcPts.isFinite { stats.processedSeconds = max(stats.processedSeconds, srcPts) }
+                            let now = Date.now
+                            if now.timeIntervalSince(lastReport) >= 0.1 {
+                                lastReport = now
+                                let wall = max(now.timeIntervalSince(started), 0.0001)
+                                let instantaneous = stats.processedSeconds / wall
+                                stats.emaSpeed = stats.emaSpeed == 0
+                                    ? instantaneous
+                                    : stats.emaSpeed * 0.85 + instantaneous * 0.15
+                                let fraction = durationSeconds > 0 ? min(stats.processedSeconds / durationSeconds, 1.0) : 0
+                                let eta = stats.emaSpeed > 0 && durationSeconds > 0
+                                    ? max(durationSeconds - stats.processedSeconds, 0) / stats.emaSpeed
+                                    : nil
+                                progress(TranscodeProgress(
+                                    fraction: fraction,
+                                    processedSeconds: stats.processedSeconds,
+                                    speed: stats.emaSpeed,
+                                    etaSeconds: eta
+                                ))
+                            }
+                            continue
+                        }
+
                         // 画质修复层（设计文档 §7.6）：源帧 → 2x 帧；时间戳与音频直通不变
                         var outgoing = ready
                         if let enhancer {
@@ -608,6 +686,12 @@ actor TranscodeEngine {
                                 speed: stats.emaSpeed,
                                 etaSeconds: eta
                             ))
+                        }
+                    }
+                    // 混合模式：源流结束冲刷剩余窗口
+                    if let blender {
+                        for frame in try blender.finish() {
+                            try await emitBlended(frame)
                         }
                     }
                     videoReceiver.finish()

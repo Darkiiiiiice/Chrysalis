@@ -631,6 +631,55 @@ func runIntegrationTests() async {
             try expect(!outcome.notes.contains { $0.contains("响度实测") }, "关闭时无响度记录")
         }
     }
+
+    await h.suite("集成：降帧感知帧混合（§7.12）") {
+        let source60 = try! await sourceClip("源-60fps-360p.mp4") { url in
+            ClipFactory.Spec(
+                url: url, size: CGSize(width: 640, height: 360),
+                codec: .h264, bitrate: 3_000_000, duration: 4, fps: 60
+            )
+        }
+
+        // 混合降帧：60 → 30，输出帧率与时长正确、notes 有记录
+        await h.runAsync("混合降帧：60→30 输出帧率与时长正确") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: source60, output: outputs.appendingPathComponent("out-blend.mp4"), codec: .h264, container: .mp4)
+            request.frameRate = .fps30
+            request.frameBlending = true
+            let outcome = try await run(request)
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            try expect(outcome.notes.contains { $0.contains("降帧混合") }, "notes 记录混合：\(outcome.notes)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs((info.video?.frameRate ?? 0) - 30) < 1.0, "输出帧率 ≈ 30：\(String(describing: info.video?.frameRate))")
+            try expect(abs(info.durationSeconds - 4.0) < 0.5, "时长 ≈ 4 秒：\(info.durationSeconds)")
+            try expect(info.audio != nil, "音频不受影响")
+            try assertNoTempFiles(in: outputs)
+        }
+
+        // 回归：关闭混合走丢帧路径（行为不变）
+        await h.runAsync("关闭混合：丢帧路径回归") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: source60, output: outputs.appendingPathComponent("out-drop.mp4"), codec: .h264, container: .mp4)
+            request.frameRate = .fps30
+            let outcome = try await run(request)
+            try expectEqual(outcome.verificationIssues.count, 0, "无自检告警：\(outcome.verificationIssues)")
+            try expect(!outcome.notes.contains { $0.contains("降帧混合") }, "关闭时无混合记录")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs((info.video?.frameRate ?? 0) - 30) < 1.0, "输出帧率 ≈ 30：\(String(describing: info.video?.frameRate))")
+        }
+
+        // 不降帧场景：开关不生效（60fps 源保持帧率）
+        await h.runAsync("保持帧率：开关无影响") {
+            try requireHardwareEncoder()
+            var request = makeRequest(input: source60, output: outputs.appendingPathComponent("out-noblend.mp4"), codec: .h264, container: .mp4)
+            request.frameRate = .source
+            request.frameBlending = true
+            let outcome = try await run(request)
+            try expect(outcome.notes.allSatisfy { !$0.contains("降帧混合") }, "不降帧时不记录混合：\(outcome.notes)")
+            let info = try await OutputProbe.info(of: outcome.outputURL)
+            try expect(abs((info.video?.frameRate ?? 0) - 60) < 1.0, "帧率保持 60：\(String(describing: info.video?.frameRate))")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

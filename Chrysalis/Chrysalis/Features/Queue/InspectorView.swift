@@ -25,6 +25,7 @@ struct InspectorView: View {
                         outputSection(job)
                         enhancementSection(job)
                         loudnessSection(job)
+                        frameBlendingSection(job)
                         hardwareSection(job)
                         errorSection(job)
                     }
@@ -370,6 +371,41 @@ struct InspectorView: View {
                 )
             }
         }
+    }
+
+    // MARK: 帧混合（设计文档 §7.12）
+
+    /// 降帧感知分区：排队中可编辑；不降帧时提示开关不生效。
+    @ViewBuilder
+    private func frameBlendingSection(_ job: TranscodeJob) -> some View {
+        InspectorSection(title: "帧混合") {
+            if job.state == .queued {
+                Toggle("降帧时混合相邻帧", isOn: Binding(
+                    get: { job.frameBlending },
+                    set: { store.setFrameBlending($0, jobID: job.id) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(Theme.TextStyle.body)
+                if !dropsFrames(job) {
+                    Text("当前帧率档位不降帧，开关不生效。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    Text("降帧时按时间位置加权混合窗口内相邻帧，减少运动卡顿感；体积可能略增。")
+                        .font(Theme.TextStyle.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else {
+                InspectorRow(label: "帧混合", value: job.frameBlending ? "开启" : "关闭")
+            }
+        }
+    }
+
+    /// 该任务是否真的在降帧（输出帧率 < 源帧率）。
+    private func dropsFrames(_ job: TranscodeJob) -> Bool {
+        guard let video = job.mediaInfo?.video else { return false }
+        return job.preset.frameRate.effectiveFrameRate(sourceFPS: video.frameRate) < video.frameRate - 0.01
     }
 
     // MARK: 画质修复（设计文档 §7.6 / §8）

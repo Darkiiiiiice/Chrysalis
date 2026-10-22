@@ -54,6 +54,8 @@ struct TranscodeRequest: Sendable {
     var measuredTotalBitrate: Int? = nil
     /// 音频响度标准化（设计文档 §7.11）；nil = 关闭（默认）。
     var loudness: LoudnessSetting? = nil
+    /// 降帧感知混合（设计文档 §7.12）：降帧时窗口内源帧按时间位置加权混合，默认关闭。
+    var frameBlending = false
 }
 
 /// 进度事件（简单值类型，设计文档 §12 风险表）。

@@ -71,6 +71,8 @@ struct QueueArchive: Codable {
         var probeResult: BitrateProbeResult?
         /// 音频响度标准化设置（§7.11）；旧队列文件没有该字段，缺省即关闭。
         var loudness: LoudnessSetting?
+        /// 降帧感知混合（§7.12）；旧队列文件没有该字段，缺省即关闭。
+        var frameBlending: Bool?
 
         init(_ job: TranscodeJob) {
             self.id = job.id
@@ -90,6 +92,7 @@ struct QueueArchive: Codable {
             self.enhancement = job.enhancement
             self.probeResult = job.probeResult
             self.loudness = job.loudness
+            self.frameBlending = job.frameBlending
         }
     }
 

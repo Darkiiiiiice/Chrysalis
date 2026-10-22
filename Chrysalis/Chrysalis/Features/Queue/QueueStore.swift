@@ -503,7 +503,8 @@ final class QueueStore {
             posterData: posterData,
             enhancement: job.enhancement,
             measuredTotalBitrate: measuredTotalBitrate,
-            loudness: job.loudness
+            loudness: job.loudness,
+            frameBlending: job.frameBlending
         )
     }
 
@@ -789,6 +790,15 @@ final class QueueStore {
         saveQueue()
     }
 
+    /// 单任务降帧感知混合（设计文档 §7.12）：仅排队中的任务可改。
+    func setFrameBlending(_ enabled: Bool, jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        guard jobs[index].state == .queued else { return }
+        guard jobs[index].frameBlending != enabled else { return }
+        jobs[index].frameBlending = enabled
+        saveQueue()
+    }
+
     /// 自动匹配的最高分候选摘要（队列行 / 检查器直接展示，不必点开确认窗口）。
     func matchedSummary(jobID: UUID) -> TMDBMovieSummary? {
         movieCandidates[jobID]?.first?.summary
@@ -1038,6 +1048,7 @@ final class QueueStore {
             job.enhancement = persisted.enhancement
             job.probeResult = persisted.probeResult
             job.loudness = persisted.loudness
+            job.frameBlending = persisted.frameBlending ?? false
             job.state = persisted.state.restoredState
             if job.state == .interrupted {
                 interruptedCount += 1

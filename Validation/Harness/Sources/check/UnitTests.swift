@@ -468,6 +468,54 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("帧混合（FrameBlender，§7.12）") {
+        h.run("权重：60→30 两帧各 50%") {
+            let weights = FrameBlender.weights(
+                frameStarts: [0, 1.0 / 60], sourceFPS: 60,
+                windowStart: 0, windowDuration: 1.0 / 30
+            )
+            try expect(weights.count == 2, "两帧参与")
+            try expect(abs(weights[0] - 0.5) < 1e-6 && abs(weights[1] - 0.5) < 1e-6, "各 50%：\(weights)")
+        }
+        h.run("权重：60→24 非均匀（0.4/0.4/0.2）") {
+            let weights = FrameBlender.weights(
+                frameStarts: [0, 1.0 / 60, 2.0 / 60], sourceFPS: 60,
+                windowStart: 0, windowDuration: 1.0 / 24
+            )
+            try expect(weights.count == 3, "三帧参与")
+            try expect(abs(weights[0] - 0.4) < 1e-6, "帧 0：\(weights[0])")
+            try expect(abs(weights[1] - 0.4) < 1e-6, "帧 1：\(weights[1])")
+            try expect(abs(weights[2] - 0.2) < 1e-6, "帧 2：\(weights[2])")
+        }
+        h.run("权重：单帧完全覆盖 → 1.0") {
+            let weights = FrameBlender.weights(
+                frameStarts: [0], sourceFPS: 24,
+                windowStart: 0, windowDuration: 1.0 / 24
+            )
+            try expect(abs(weights[0] - 1.0) < 1e-6, "单帧权重 1：\(weights)")
+        }
+        h.run("权重：窗口外帧权重 0 / 全零时返回零数组") {
+            let outside = FrameBlender.weights(
+                frameStarts: [1.0], sourceFPS: 60,
+                windowStart: 0, windowDuration: 1.0 / 30
+            )
+            try expect(abs(outside[0]) < 1e-9, "窗口外帧权重 0：\(outside)")
+            let empty = FrameBlender.weights(
+                frameStarts: [10.0], sourceFPS: 60,
+                windowStart: 0, windowDuration: 1.0 / 30
+            )
+            try expect(empty.allSatisfy { $0 == 0 }, "无覆盖返回零权重（调用方跳过窗口）")
+        }
+        h.run("权重：归一化（Σ=1）") {
+            let weights = FrameBlender.weights(
+                frameStarts: [0, 1.0 / 60, 2.0 / 60, 3.0 / 60], sourceFPS: 60,
+                windowStart: 0.5 / 60, windowDuration: 2.0 / 60
+            )
+            let total = weights.reduce(0, +)
+            try expect(abs(total - 1.0) < 1e-6, "权重和为 1：\(total)")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

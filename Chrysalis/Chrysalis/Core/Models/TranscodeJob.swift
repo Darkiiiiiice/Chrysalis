@@ -64,6 +64,8 @@ struct TranscodeJob: Identifiable, Sendable, Equatable {
     var probeResult: BitrateProbeResult?
     /// 音频响度标准化设置（设计文档 §7.11）；nil = 关闭（默认）。
     var loudness: LoudnessSetting?
+    /// 降帧感知混合（设计文档 §7.12）；默认关闭，仅降帧时生效。
+    var frameBlending = false
     /// 正在执行样片试编码（检查器按钮防重复触发）。
     var isProbing = false
     /// 试编码进度文案（探测中非 nil，如「第 2/3 段」）；不持久化。
