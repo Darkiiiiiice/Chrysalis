@@ -536,6 +536,70 @@ func runIntegrationTests() async {
             }
         }
     }
+
+    await h.suite("集成：视频体检（§7.10）") {
+        // 快速体检：测试片字段断言（读得到即报；结论映射走预检口径）
+        await h.runAsync("quickReport：规格 / 音轨 / 结论 / moov 检测") {
+            try requireHardwareEncoder()
+            let report = await MediaProbeService.quickReport(url: h264Source)
+            try expectEqual(report.verdict, ProbeVerdict.ready, "1080p H.264 测试片应绿灯：\(report.verdictMessage)")
+            try expectEqual(report.video?.codecFourCC, "avc1", "编码 fourCC")
+            try expectEqual(report.video?.displayWidth, 1920, "宽度")
+            try expect(abs(report.durationSeconds - 2.0) < 0.5, "时长 ≈ 2 秒：\(report.durationSeconds)")
+            try expectEqual(report.audioTracks.count, 1, "单音轨")
+            try expectEqual(report.audioTracks.first?.codecName, "AAC", "音轨 AAC")
+            try expectEqual(report.isPlayable, true, "可播放")
+            try expectEqual(report.isProtected, false, "无 DRM")
+            try expect(report.isMoovAtFront != nil, "MP4 容器应执行 moov 检测")
+            try expect(report.video?.hardwareDecodeSupported == true, "H.264 硬解可用")
+            try expect(report.fileSizeBytes > 0, "文件大小")
+        }
+
+        // 深度探测：16 秒片 → 3 段抽样 → 码率分布 / GOP / 恒定帧率不误报 VFR
+        await h.runAsync("deepScan：段码率分布 + GOP + VFR 不误报") {
+            try requireHardwareEncoder()
+            let longSource = try await sourceClip("源-16秒-360p.mp4") { url in
+                ClipFactory.Spec(
+                    url: url, size: CGSize(width: 640, height: 360),
+                    codec: .h264, bitrate: 1_500_000, duration: 16
+                )
+            }
+            let report = await MediaProbeService.quickReport(url: longSource)
+            try expect(report.durationSeconds > 15, "深度探测前置：时长足够")
+            let deep = await MediaProbeService.deepScan(url: longSource, report: report)
+            try expect(deep != nil, "深度探测应有结果")
+            guard let stats = deep else { return }
+            try expectEqual(stats.sampledSegments, 3, "3 段抽样")
+            try expect(stats.sampledSeconds > 4, "采样时长 > 4 秒：\(stats.sampledSeconds)")
+            try expect(stats.segmentBitrates != nil, "段码率分布应有值")
+            guard let bitrates = stats.segmentBitrates else { return }
+            try expect(bitrates.min > 0 && bitrates.max < 30_000_000, "段码率合理区间：\(bitrates)")
+            try expect(stats.gopSizes != nil, "GOP 分布应有值")
+            guard let gop = stats.gopSizes else { return }
+            try expect(gop.average > 0 && gop.average <= 120, "GOP 合理（ClipFactory maxKeyFrame = 2×fps）：\(gop)")
+            try expectEqual(stats.isVFR, false, "恒定 30fps 测试片不应误报 VFR：ratio=\(String(describing: stats.frameIntervalRatio)) avg=\(String(describing: stats.averageFrameInterval))")
+            try expect(stats.frameIntervalRatio != nil, "帧间隔比值应有值")
+            guard let ratio = stats.frameIntervalRatio else { return }
+            try expect(ratio < 1.5, "比值低于阈值：\(ratio)")
+        }
+
+        // Markdown 导出包含深度统计与 moov 行
+        await h.runAsync("Markdown：含深度统计与 moov 行") {
+            try requireHardwareEncoder()
+            let longSource = try await sourceClip("源-16秒-360p.mp4") { url in
+                ClipFactory.Spec(
+                    url: url, size: CGSize(width: 640, height: 360),
+                    codec: .h264, bitrate: 1_500_000, duration: 16
+                )
+            }
+            var report = await MediaProbeService.quickReport(url: longSource)
+            report.deep = await MediaProbeService.deepScan(url: longSource, report: report)
+            let markdown = ProbeReportMarkdown.generate(report)
+            try expect(markdown.contains("段码率分布"), "含码率分布行")
+            try expect(markdown.contains("关键帧间隔（GOP）"), "含 GOP 行")
+            try expect(markdown.contains("moov 前置"), "含 moov 行")
+        }
+    }
 }
 
 /// 硬件编码器门槛（缺则跳过用例）。

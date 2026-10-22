@@ -5,6 +5,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case queue
     case presets
     case subtitles
+    case probe
     case history
     case settings
 
@@ -15,6 +16,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .queue: "队列"
         case .presets: "预设"
         case .subtitles: "字幕"
+        case .probe: "体检"
         case .history: "历史"
         case .settings: "设置"
         }
@@ -25,6 +27,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .queue: "rectangle.stack"
         case .presets: "slider.horizontal.3"
         case .subtitles: "text.quote"
+        case .probe: "stethoscope"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
         }

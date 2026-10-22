@@ -222,6 +222,162 @@ func runUnitTests() async {
         }
     }
 
+    await h.suite("视频体检（MediaProbe，§7.10）") {
+        h.run("结论映射：绿灯（矩阵内可转）") {
+            let verdict = MediaProbeService.verdict(
+                ext: "mp4", isReadable: true, isPlayable: true, isProtected: false,
+                hasVideo: true, isHDR: false, hardwareDecode: true
+            )
+            try expectEqual(verdict.kind, ProbeVerdict.ready, "矩阵内可转应绿灯")
+        }
+        h.run("结论映射：黄灯（容器不在矩阵 / HDR / 无硬解）") {
+            let container = MediaProbeService.verdict(
+                ext: "mkv", isReadable: true, isPlayable: true, isProtected: false,
+                hasVideo: true, isHDR: false, hardwareDecode: true
+            )
+            try expectEqual(container.kind, ProbeVerdict.restricted, "容器不在矩阵应黄灯")
+            try expect(container.message.contains("mkv"), "人话原因含扩展名：\(container.message)")
+            let hdr = MediaProbeService.verdict(
+                ext: "mp4", isReadable: true, isPlayable: true, isProtected: false,
+                hasVideo: true, isHDR: true, hardwareDecode: true
+            )
+            try expectEqual(hdr.kind, ProbeVerdict.restricted, "HDR 应黄灯")
+            let noHW = MediaProbeService.verdict(
+                ext: "mp4", isReadable: true, isPlayable: true, isProtected: false,
+                hasVideo: true, isHDR: false, hardwareDecode: false
+            )
+            try expectEqual(noHW.kind, ProbeVerdict.restricted, "无硬件解码应黄灯")
+        }
+        h.run("结论映射：红灯（DRM / 无视频轨 / 不可读）") {
+            let drm = MediaProbeService.verdict(
+                ext: "m4v", isReadable: true, isPlayable: true, isProtected: true,
+                hasVideo: true, isHDR: false, hardwareDecode: true
+            )
+            try expectEqual(drm.kind, ProbeVerdict.blocked, "DRM 应红灯")
+            let noVideo = MediaProbeService.verdict(
+                ext: "mp4", isReadable: true, isPlayable: true, isProtected: false,
+                hasVideo: false, isHDR: false, hardwareDecode: true
+            )
+            try expectEqual(noVideo.kind, ProbeVerdict.blocked, "无视频轨应红灯")
+            let unreadable = MediaProbeService.verdict(
+                ext: "mp4", isReadable: false, isPlayable: false, isProtected: false,
+                hasVideo: false, isHDR: false, hardwareDecode: false
+            )
+            try expectEqual(unreadable.kind, ProbeVerdict.blocked, "不可读应红灯")
+        }
+        h.run("moov 前置：快启动 / 后置 / 非 MP4 容器") {
+            let directory = try Artifacts.subdirectory("probe-moov")
+            func atom(_ type: String, payload: Int) -> Data {
+                var data = Data()
+                var size = UInt32(8 + payload).bigEndian
+                withUnsafeBytes(of: &size) { data.append(contentsOf: $0) }
+                data.append(contentsOf: Array(type.utf8))
+                data.append(contentsOf: Data(repeating: 0, count: payload))
+                return data
+            }
+            // 快启动：ftyp → moov → mdat
+            let fast = directory.appendingPathComponent("fast.mp4")
+            try (atom("ftyp", payload: 8) + atom("moov", payload: 8) + atom("mdat", payload: 4))
+                .write(to: fast)
+            try expectEqual(MediaProbeService.isMoovAtFront(fileURL: fast), true, "moov 在前应判定快启动")
+            // 后置：ftyp → mdat → moov
+            let slow = directory.appendingPathComponent("slow.mp4")
+            try (atom("ftyp", payload: 8) + atom("mdat", payload: 4) + atom("moov", payload: 8))
+                .write(to: slow)
+            try expectEqual(MediaProbeService.isMoovAtFront(fileURL: slow), false, "moov 在后应判定非快启动")
+            // 非 MP4 容器不检测
+            let mkv = directory.appendingPathComponent("movie.mkv")
+            try Data(repeating: 0, count: 32).write(to: mkv)
+            try expectEqual(MediaProbeService.isMoovAtFront(fileURL: mkv), nil, "非 MP4/MOV/M4V 返回 nil")
+        }
+        h.run("VFR 判定：恒定帧率不误报 / 大间隔触发 / 样本不足") {
+            let constant = Array(repeating: 1.0 / 30, count: 60)
+            let judge = MediaProbeService.vfrJudgement(frameIntervals: constant)
+            try expectEqual(judge.isVFR, false, "恒定间隔不误报")
+            var jumpy = constant
+            jumpy[10] = 0.2
+            let jumpyJudge = MediaProbeService.vfrJudgement(frameIntervals: jumpy)
+            try expectEqual(jumpyJudge.isVFR, true, "max/avg > 1.5 应判疑似 VFR")
+            let tooFew = MediaProbeService.vfrJudgement(frameIntervals: [1.0 / 30, 1.0 / 30])
+            try expectEqual(tooFew.isVFR, false, "样本不足不判定")
+        }
+        h.run("码率分布：min/avg/max") {
+            let distribution = SampleStatistics.Distribution.make([3_000_000, 5_000_000, 7_000_000])
+            try expectEqual(distribution?.min, 3_000_000, "最小")
+            try expectEqual(distribution?.average, 5_000_000, "平均")
+            try expectEqual(distribution?.max, 7_000_000, "最大")
+            try expect(SampleStatistics.Distribution.make([]) == nil, "空数组返回 nil")
+        }
+        h.run("Markdown 生成：结论 / 分区 / 深度占位") {
+            let report = MediaProbeReport(
+                verdict: .restricted,
+                verdictMessage: "输入容器 .mkv 不在 v1 支持矩阵（MP4 / MOV / M4V）：规格仅供参考，蝉蜕 v1 不转码该容器。",
+                fileName: "movie.mkv",
+                containerLabel: "MKV",
+                fileSizeBytes: 134_217_728,
+                durationSeconds: 120,
+                createdAt: nil,
+                modifiedAt: nil,
+                video: VideoStreamInfo(
+                    codecFourCC: "avc1", codecName: "H.264",
+                    displayWidth: 1920, displayHeight: 1080, frameRate: 30,
+                    bitrate: 4_000_000, hardwareDecodeSupported: true
+                ),
+                colorLabel: "BT.709",
+                audioTracks: [
+                    AudioStreamInfo(codecFourCC: "aac ", codecName: "AAC", channelCount: 2, sampleRate: 48000, bitrate: 192_000)
+                ],
+                isPlayable: true,
+                isProtected: false,
+                isMoovAtFront: nil,
+                metadata: ["标题": "体检样例"],
+                deep: nil,
+                deepError: nil,
+                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000),
+                deepScannedAt: nil
+            )
+            let markdown = ProbeReportMarkdown.generate(report)
+            try expect(markdown.contains("# 视频体检报告：movie.mkv"), "标题含文件名")
+            try expect(markdown.contains("🟡"), "黄灯图标")
+            try expect(markdown.contains("可读，但转码受限"), "结论文案")
+            try expect(markdown.contains("1920×1080"), "视频规格")
+            try expect(markdown.contains("BT.709"), "色彩标签")
+            try expect(markdown.contains("#1 AAC"), "音轨行")
+            try expect(markdown.contains("未执行"), "深度探测占位")
+            try expect(markdown.contains("标题：体检样例"), "元数据行")
+        }
+        h.run("报告 Codable 往返（JSON 导出基础）") {
+            let report = MediaProbeReport(
+                verdict: .ready,
+                verdictMessage: "在支持矩阵内，可以加入转码队列。",
+                fileName: "a.mp4",
+                containerLabel: "MP4",
+                fileSizeBytes: 1024,
+                durationSeconds: 5,
+                createdAt: nil,
+                modifiedAt: nil,
+                video: nil,
+                colorLabel: nil,
+                audioTracks: [],
+                isPlayable: true,
+                isProtected: false,
+                isMoovAtFront: true,
+                metadata: [:],
+                deep: SampleStatistics(
+                    sampledSegments: 3, sampledSeconds: 6,
+                    segmentBitrates: SampleStatistics.Distribution(min: 1, average: 2, max: 3),
+                    gopSizes: nil, isVFR: false, frameIntervalRatio: 1.1, averageFrameInterval: 1.0 / 30
+                ),
+                deepError: nil,
+                quickScannedAt: Date(timeIntervalSince1970: 1_790_000_000),
+                deepScannedAt: nil
+            )
+            let data = try JSONEncoder().encode(report)
+            let decoded = try JSONDecoder().decode(MediaProbeReport.self, from: data)
+            try expectEqual(decoded, report, "编码解码应等值")
+        }
+    }
+
     await h.suite("输出路径（OutputPlanner）") {
         let directory: URL
         let created: Bool

@@ -30,6 +30,11 @@ enum Fmt {
         return String(format: "%.0f%%", min(max(fraction, 0), 1) * 100)
     }
 
+    /// 日期时间（体检报告 / 历史展示用）。
+    static func dateTime(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
+    }
+
     static func bitrate(_ bitsPerSecond: Int) -> String {
         guard bitsPerSecond > 0 else { return "—" }
         if bitsPerSecond >= 1_000_000 {
